@@ -411,39 +411,35 @@ class DraftPublisher:
             #    用户实测：文章草稿 2 次、贴图草稿 3 次（按钮连续换屏出现，
             #    文本都叫「发表」）——完成判据=整个等待窗内无可见确认按钮
             dialog_scope = ".new_mass_send_dialog, .weui-desktop-dialog, [class*=dialog]"
-            first_hit = (self._js_click_text(editor, "发表", timeout=25, scope_css=dialog_scope)
-                         or self._js_click_text(editor, "继续发表", timeout=4, scope_css=dialog_scope))
+            first_hit = self._click_dialog_button(editor, ("发表", "继续发表"), 25)
             if not first_hit:
                 # 弹窗未预开 → 点编辑器底栏「发表」唤出弹窗后重试
                 if not (self._js_click_text(editor, "发表", timeout=10,
                                             scope_css=".mass_send, .tool_bar, [class*=publish], .footer")
                         or self._js_click_text(editor, "发表", timeout=8)):
                     return False, "「发表」按钮未找到（弹窗未预开且底栏无按钮）"
-                if not (self._js_click_text(editor, "发表", timeout=25, scope_css=dialog_scope)
-                        or self._js_click_text(editor, "继续发表", timeout=4, scope_css=dialog_scope)):
+                if not self._click_dialog_button(editor, ("发表", "继续发表"), 25):
                     return False, "点底栏「发表」后弹窗未出现"
             clicks = 1
-            # 每点一屏后必须等「弹窗内容变化或弹窗关闭」再点下一屏：
-            # 屏幕切换需数秒，固定短间隔连点会空点旧屏/误唤新弹窗
-            # （2026-08-28 贴图链最后一屏两次没点中的根因）。
+            # 每点一屏后等弹窗状态稳定再点下一屏；完成判据=「安静期」：
+            # 弹窗关闭后连续 10 秒无新弹窗才算提交完成（换屏空窗期
+            # 2~5 秒，只看瞬时关闭会漏掉第二屏「继续发表」）。
             fp = self._dialog_fingerprint(editor)
-            for _ in range(6):          # 贴图实测 3+ 屏，留余量防死循环
-                settle = time.time() + 20
-                while time.time() < settle:
-                    time.sleep(2.0)
-                    if not self._confirm_dialog_open(editor):
-                        break           # 弹窗已关闭 → 提交完成
-                    if self._dialog_fingerprint(editor) != fp:
-                        break           # 已切到下一确认屏
-                if not self._confirm_dialog_open(editor):
-                    break               # 弹窗消失 = 真正提交完成
-                hit = (self._js_click_text(editor, "发表", timeout=10, scope_css=dialog_scope)
-                       or self._js_click_text(editor, "继续发表", timeout=3, scope_css=dialog_scope))
+            for _ in range(6):          # 实测 2 屏（发表+继续发表），留余量
+                state = self._wait_settle(editor, fp)
+                if state == "done":
+                    break
+                hit = self._click_dialog_button(editor, ("发表", "继续发表"), 10)
                 if not hit:
-                    break               # 无可见确认按钮 → 已到最后
+                    # 无按钮：可能正处换屏空窗，再等一轮安静期
+                    if self._wait_settle(editor, fp, quiet_secs=8,
+                                         max_wait=15) == "done":
+                        break
+                    if not self._click_dialog_button(editor, ("发表", "继续发表"), 8):
+                        break
                 clicks += 1
                 fp = self._dialog_fingerprint(editor)
-            logger.info("确认链完成：共点 %d 次「发表」（以弹窗消失为完成判据）", clicks)
+            logger.info("确认链完成：共点 %d 次（安静期判据：关闭10秒无新弹窗）", clicks)
             human_pause()
             if self._session_lost(editor):
                 return False, "确认发表后会话被重置，需人工核对发表记录"
@@ -489,6 +485,65 @@ class DraftPublisher:
             time.sleep(20)
         logger.warning("金标准未通过：《%s…》%.0f 秒后仍在草稿箱", card.title[:16], tolerance)
         return False
+
+    def _click_dialog_button(self, editor: Any, texts: tuple[str, ...],
+                             timeout: float) -> Optional[str]:
+        """真实点击可见弹窗底栏主按钮（返回点中的按钮文本）。
+
+        实战教训（2026-08-28 工程行业大脑首篇）：run_js 合成 click 对
+        Vue 表单弹窗可能完全无响应（点了没反应也不报错），必须用
+        DrissionPage 元素点击走 CDP 真实鼠标事件。第二屏按钮可能是
+        「继续发表」（账号无通知次数时）而非「发表」。
+        """
+        from .safety import assert_button_safe
+        for t in texts:
+            assert_button_safe(t)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                for sel in ("css:.weui-desktop-dialog__ft button",
+                            "css:button.weui-desktop-btn_primary"):
+                    for e in editor.eles(sel, timeout=1):
+                        try:
+                            w, _h = e.rect.size
+                            if not w or w < 40:
+                                continue
+                            txt = (e.text or "").strip()
+                            if txt in texts and e.states.is_displayed:
+                                e.click()
+                                logger.info("真实点击弹窗按钮: 「%s」", txt)
+                                return txt
+                        except Exception:  # noqa: BLE001 — 单元素失败跳过
+                            continue
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(1.5)
+        logger.warning("弹窗主按钮 %s 在 %.0f 秒内未出现", texts, timeout)
+        return None
+
+    def _wait_settle(self, editor: Any, fp: str, quiet_secs: float = 10.0,
+                     max_wait: float = 30.0) -> str:
+        """点击后等待弹窗状态稳定。
+
+        返回："changed"（切到下一确认屏，可点击）/ "done"（弹窗关闭且
+        安静 quiet_secs 秒无新弹窗 = 提交完成）/ "same"（同屏无变化，
+        需重试点击当前屏）。
+        """
+        start = time.time()
+        closed_since = None
+        while time.time() - start < max_wait:
+            time.sleep(2.0)
+            cur = self._dialog_fingerprint(editor)
+            if cur:
+                closed_since = None
+                if cur != fp:
+                    return "changed"
+            else:
+                if closed_since is None:
+                    closed_since = time.time()
+                elif time.time() - closed_since >= quiet_secs:
+                    return "done"
+        return "same"
 
     def _dialog_fingerprint(self, editor: Any) -> str:
         """当前可见确认弹窗的文本指纹（空串=无可见弹窗=已关闭/已提交）。"""
