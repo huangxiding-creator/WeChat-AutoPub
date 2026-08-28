@@ -91,6 +91,7 @@ def ensure_login(
         except Exception as exc:  # noqa: BLE001
             logger.debug("账号选择弹窗检查失败: %s", exc)
         logger.info("cookie 有效，免扫码登录 nickname=%s token=%s", nickname, token[:6] + "…")
+        session.minimize_window()          # 不打扰用户桌面
         return LoginResult(ok=True, nickname=nickname, token=token)
 
     def _notify(action: str, detail: str) -> None:
@@ -103,6 +104,25 @@ def ensure_login(
     # 扫码前清场：旧会话的 mp tab 带旧 token 轮询，会让平台把
     # 新登录当冲突掐死（实战：会话 2 分钟暴毙且越来越快）
     session.close_stale_mp_tabs(keep=session.tab)
+
+    # 一键「登录」快路径（2026-08-28 实战发现）：会话过期落到登录页时，
+    # 页面上有沿用上次身份的「登录」按钮（真按钮，非「使用账号登录」），
+    # 点它可免扫码恢复会话。8 秒内没进 home 再走扫码提醒。
+    try:
+        from . import nav
+        if nav.js_click_visible_text(session.tab, "登录", timeout=4):
+            time.sleep(8)
+            if session.is_logged_in():
+                url = session.tab.url or ""
+                nickname = extract_nickname(session)
+                logger.info("一键「登录」恢复会话成功 nickname=%s", nickname)
+                session.retarget_capture()
+                session.minimize_window()
+                return LoginResult(ok=True, nickname=nickname,
+                                   token=extract_token(url))
+            logger.info("一键「登录」未恢复会话，转扫码流程")
+    except Exception as exc:  # noqa: BLE001 — 快路径失败不阻塞扫码
+        logger.debug("一键登录尝试失败: %s", exc)
 
     _notify("请扫码登录公众号", "浏览器已打开公众号后台，请用微信扫码并确认登录。")
 
@@ -126,6 +146,7 @@ def ensure_login(
                 logger.debug("登录后账号选择弹窗检查失败: %s", exc)
             logger.info("扫码登录成功 nickname=%s token=%s", nickname, token[:6] + "…")
             session.retarget_capture()      # 监听挂到登录后的活跃 tab
+            session.minimize_window()       # 扫码完成，归还桌面
             return LoginResult(ok=True, nickname=nickname, token=token)
         if time.time() - last_remind >= remind_interval:
             remain = int((deadline - time.time()) / 60)

@@ -37,7 +37,27 @@ from .session import BrowserSession, click_robust, human_pause, is_real
 
 logger = logging.getLogger(__name__)
 
-_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+# 平台日期格式实测：ISO(2026-08-28)、中文(2026年8月28日 / 08月28日)、相对(今天/昨天)
+_DATE_PATTERNS = (
+    re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})"),
+    re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日"),
+)
+_MD_RE = re.compile(r"(\d{1,2})月(\d{1,2})日")
+_TIME_ONLY_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")     # 纯时间=今天
+_WEEKDAY_MAP = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+
+
+def _weekday_date(text: str, now: datetime) -> Optional[datetime]:
+    """星期X/周X → 6天内对应日期（平台只对近一周条目用周几标注）。"""
+    m = re.search(r"[星期周]([一二三四五六日天])", text)
+    if not m:
+        return None
+    target = _WEEKDAY_MAP[m.group(1)]
+    for back in range(7):
+        d = now - timedelta(days=back)
+        if d.weekday() == target:
+            return datetime(d.year, d.month, d.day)
+    return None
 
 # 草稿箱直达 URL（菜单点击失败时的兜底）
 _DRAFT_BOX_URL = f"{MP_BASE_URL}/cgi-bin/appmsg?t=media/appmsg_list&action=list_card"
@@ -71,13 +91,37 @@ class DraftCard:
 
 
 def _parse_date(text: str) -> Optional[datetime]:
-    m = _DATE_RE.search(text or "")
-    if not m:
-        return None
-    try:
-        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    except ValueError:
-        return None
+    text = text or ""
+    now = datetime.now()
+    for pat in _DATE_PATTERNS:
+        m = pat.search(text)
+        if m:
+            try:
+                return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                continue
+    if "今天" in text:
+        return now
+    if "昨天" in text:
+        return now - timedelta(days=1)
+    wd = _weekday_date(text, now)
+    if wd is not None:
+        return wd
+    m = _MD_RE.search(text)
+    if m:
+        try:
+            dt = datetime(now.year, int(m.group(1)), int(m.group(2)))
+        except ValueError:
+            return None
+        if dt > now + timedelta(days=2):     # 未来日期 → 去年（跨年贴）
+            try:
+                dt = datetime(now.year - 1, int(m.group(1)), int(m.group(2)))
+            except ValueError:
+                return None
+        return dt
+    if _TIME_ONLY_RE.search(text):      # 「更新于 15:06」无日期词=今天
+        return now
+    return None
 
 
 def tab_js_click(tab: Any, needle_json: str) -> bool:
@@ -102,6 +146,32 @@ return false;
         return bool(tab.run_js(js))
     except Exception:  # noqa: BLE001
         return False
+
+
+# 可见确认弹窗的文本指纹（空串=当前无可见弹窗）。确认链用它判断
+# 「屏幕已实际切换」与「弹窗已关闭」——连点过快会空点旧屏、或在提交
+# 完成后的界面误点出新一轮弹窗（2026-08-28 贴图链实战教训）。
+_DIALOG_FINGERPRINT_JS = r"""
+return (() => {
+  const scopes = ['.new_mass_send_dialog', '.weui-desktop-dialog', '[class*=dialog]'];
+  for (const sel of scopes) {
+    for (const d of document.querySelectorAll(sel)) {
+      const r = d.getBoundingClientRect();
+      if (r.width < 50 || r.height < 50) continue;
+      let ok = true, op = 1;
+      for (let n = d; n && n !== document.body; n = n.parentElement) {
+        const cs = getComputedStyle(n);
+        if (cs.display === 'none' || cs.visibility === 'hidden') { ok = false; break; }
+        op = Math.min(op, parseFloat(cs.opacity));
+      }
+      if (!ok || op < 0.5) continue;
+      const t = (d.innerText || '').trim().replace(/\s+/g, ' ');
+      if (t) return t.slice(0, 300);
+    }
+  }
+  return '';
+})();
+"""
 
 
 class DraftPublisher:
@@ -312,8 +382,8 @@ class DraftPublisher:
         13:06 亲手实走的完整链路（ground truth）：
         1. 草稿卡片 hover 唤出工具栏 → 点卡片「发表」
            → 新 tab 打开 appmsg_edit，且 new_mass_send_dialog 已预开
-        2. 对话框内点第一个「发表」→ 第二屏（未开启群发通知）
-        3. 第二屏再点第二个「发表」（位置不同，文本相同）→ 提交成功，弹窗消失
+        2. 对话框内连点「发表」（文章2次/贴图3次，按钮连续换屏）
+        3. 再无确认按钮=提交完成，弹窗消失
         旧版全部失败原因：在草稿列表 tab 上找弹窗（弹窗在编辑器 tab）。
         """
         tab = self._s.tab
@@ -337,41 +407,99 @@ class DraftPublisher:
                 human_pause()
             if self._session_lost(editor):
                 return False, "会话被平台重置，需重新扫码"
-            # 4. 群发对话框：点主按钮「发表」→ 等第二屏「继续发表」→ 点
-            if not self._js_click_text(editor, "发表", timeout=25,
-                                       scope_css=".new_mass_send_dialog"):
-                # 对话框可能未预开 → 退路：点编辑器底栏 mass_send「发表」
-                if not self._js_click_text(editor, "发表", timeout=8,
-                                           scope_css=".mass_send"):
-                    return False, "群发对话框「发表」未点中"
-                if not self._js_click_text(editor, "发表", timeout=25,
-                                           scope_css=".new_mass_send_dialog"):
-                    return False, "群发对话框「发表」未点中"
-            human_pause()
-            # 5. 第二屏确认：按钮仍叫「发表」但位置不同（用户实测 ground truth，
-            #    不是「继续发表」——留作兜底文本）
-            human_pause(1.5, 3.0)
+            # 4. 确认链：弹窗内连点「发表」直到再无确认按钮
+            #    用户实测：文章草稿 2 次、贴图草稿 3 次（按钮连续换屏出现，
+            #    文本都叫「发表」）——完成判据=整个等待窗内无可见确认按钮
             dialog_scope = ".new_mass_send_dialog, .weui-desktop-dialog, [class*=dialog]"
-            if not (self._js_click_text(editor, "发表", timeout=20, scope_css=dialog_scope)
-                    or self._js_click_text(editor, "继续发表", timeout=8, scope_css=dialog_scope)):
-                return False, "第二个「发表」未点中（发布未完成）"
+            first_hit = (self._js_click_text(editor, "发表", timeout=25, scope_css=dialog_scope)
+                         or self._js_click_text(editor, "继续发表", timeout=4, scope_css=dialog_scope))
+            if not first_hit:
+                # 弹窗未预开 → 点编辑器底栏「发表」唤出弹窗后重试
+                if not (self._js_click_text(editor, "发表", timeout=10,
+                                            scope_css=".mass_send, .tool_bar, [class*=publish], .footer")
+                        or self._js_click_text(editor, "发表", timeout=8)):
+                    return False, "「发表」按钮未找到（弹窗未预开且底栏无按钮）"
+                if not (self._js_click_text(editor, "发表", timeout=25, scope_css=dialog_scope)
+                        or self._js_click_text(editor, "继续发表", timeout=4, scope_css=dialog_scope)):
+                    return False, "点底栏「发表」后弹窗未出现"
+            clicks = 1
+            # 每点一屏后必须等「弹窗内容变化或弹窗关闭」再点下一屏：
+            # 屏幕切换需数秒，固定短间隔连点会空点旧屏/误唤新弹窗
+            # （2026-08-28 贴图链最后一屏两次没点中的根因）。
+            fp = self._dialog_fingerprint(editor)
+            for _ in range(6):          # 贴图实测 3+ 屏，留余量防死循环
+                settle = time.time() + 20
+                while time.time() < settle:
+                    time.sleep(2.0)
+                    if not self._confirm_dialog_open(editor):
+                        break           # 弹窗已关闭 → 提交完成
+                    if self._dialog_fingerprint(editor) != fp:
+                        break           # 已切到下一确认屏
+                if not self._confirm_dialog_open(editor):
+                    break               # 弹窗消失 = 真正提交完成
+                hit = (self._js_click_text(editor, "发表", timeout=10, scope_css=dialog_scope)
+                       or self._js_click_text(editor, "继续发表", timeout=3, scope_css=dialog_scope))
+                if not hit:
+                    break               # 无可见确认按钮 → 已到最后
+                clicks += 1
+                fp = self._dialog_fingerprint(editor)
+            logger.info("确认链完成：共点 %d 次「发表」（以弹窗消失为完成判据）", clicks)
             human_pause()
             if self._session_lost(editor):
                 return False, "确认发表后会话被重置，需人工核对发表记录"
             # 📡 捕获发布链路 CGI（接口复刻数据源）
             if self._s.capture:
                 self._s.capture.drain("draft_publish")
-            # 6. 金标准验证：发表记录能搜到最好；搜不到只告警（发表记录页有
-            #    「请重新登录」瞬时故障，假阴性会诱发重复发布——已提交就认）
-            vok, vdetail = self._verify_published(tab, card.title)
-            if vok:
-                return True, "发布成功（发表记录已确认）"
-            logger.warning("已提交发布，但发表记录核对未通过（%s）——请人工抽查", vdetail)
-            return True, "已提交（发表记录核对瞬时失败，建议人工抽查）"
+            # 6. 金标准验证：草稿从草稿箱消失才是真发布。贴图草稿与源文章
+            #    同名 → 发表记录按标题核对必然假阳性（2026-08-28 三次假阳性
+            #    台账教训）；消失=成功；未消失=失败，下次运行自然重试（若
+            #    其实已发布，草稿不会再出现在箱里，天然防重复发布）。
+            if self._verify_box_gone(tab, card):
+                return True, "发布成功（草稿已从草稿箱消失）"
+            return False, "已点发表但草稿仍在草稿箱（缓存延迟或未生效），下次自动重试"
         finally:
             if self._s.capture:
                 self._s.capture.drain("draft_flow_end")
             self._close_editor_tab(editor)
+
+    def _verify_box_gone(self, tab: Any, card: DraftCard,
+                         tolerance: float = 180.0) -> bool:
+        """金标准：发布成功的草稿会从草稿箱消失（列表缓存有分钟级延迟）。
+
+        刷新草稿箱轮询至 tolerance 秒；True=已消失（真发布）。
+        """
+        deadline = time.time() + tolerance
+        opened = False
+        while time.time() < deadline:
+            try:
+                if not opened or "appmsg" not in (tab.url or ""):
+                    if not self._open_draft_box():
+                        return False
+                    opened = True
+                else:
+                    tab.refresh()
+                self._s.wait_ready(timeout=15)
+                titles = [c.title for c in self._parse_cards()]
+                if card.title not in titles:
+                    logger.info("✅ 金标准通过：《%s…》已从草稿箱消失", card.title[:16])
+                    return True
+                logger.info("草稿仍在箱中（列表缓存延迟），继续等待确认…")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("草稿箱复核异常: %s", exc)
+            time.sleep(20)
+        logger.warning("金标准未通过：《%s…》%.0f 秒后仍在草稿箱", card.title[:16], tolerance)
+        return False
+
+    def _dialog_fingerprint(self, editor: Any) -> str:
+        """当前可见确认弹窗的文本指纹（空串=无可见弹窗=已关闭/已提交）。"""
+        try:
+            return (editor.run_js(_DIALOG_FINGERPRINT_JS) or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _confirm_dialog_open(self, editor: Any) -> bool:
+        """确认弹窗当前是否可见（指纹非空）。"""
+        return bool(self._dialog_fingerprint(editor))
 
     def _click_card_publish(self, card_el: Any, card: DraftCard) -> bool:
         """hover 唤出工具栏后点卡片「发表」（精确文本，绝不碰删除）。"""

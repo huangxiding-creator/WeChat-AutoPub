@@ -18,19 +18,25 @@ logger = logging.getLogger(__name__)
 _CLICK_VISIBLE_TEXT_JS = """
 let roots = arguments[0] ? Array.from(document.querySelectorAll(arguments[0])) : [];
 if (roots.length === 0) roots = [document];
-for (const root of roots) {
-  const cands = root.querySelectorAll('button, a, [role=button], .weui-desktop-btn, span, div');
-  for (const b of cands) {
-    const r = b.getBoundingClientRect();
-    if (r.width < 5 || r.height < 5) continue;
-    let ok = true, op = 1;
-    for (let n = b; n && n !== document.body; n = n.parentElement) {
-      const cs = getComputedStyle(n);
-      if (cs.display === 'none' || cs.visibility === 'hidden') { ok = false; break; }
-      op = Math.min(op, parseFloat(cs.opacity));
+// 实战教训（2026-08-28 贴图链）：确认弹窗的标题 DIV 文本恰为「发表」，
+// 与底部真按钮同名——按 DOM 顺序首个命中是标题 → 点了没反应（7连点0提交）。
+// → 两轮扫描：第一轮只找真按钮类元素，找不到才退回 div/span 兜底。
+const SELS = ['button, [role=button], .weui-desktop-btn, a',
+              'button, [role=button], .weui-desktop-btn, a, span, div'];
+for (const sel of SELS) {
+  for (const root of roots) {
+    for (const b of root.querySelectorAll(sel)) {
+      const r = b.getBoundingClientRect();
+      if (r.width < 5 || r.height < 5) continue;
+      let ok = true, op = 1;
+      for (let n = b; n && n !== document.body; n = n.parentElement) {
+        const cs = getComputedStyle(n);
+        if (cs.display === 'none' || cs.visibility === 'hidden') { ok = false; break; }
+        op = Math.min(op, parseFloat(cs.opacity));
+      }
+      if (!ok || op < 0.5) continue;
+      if ((b.innerText || '').trim() === arguments[1]) { b.click(); return true; }
     }
-    if (!ok || op < 0.5) continue;
-    if ((b.innerText || '').trim() === arguments[1]) { b.click(); return true; }
   }
 }
 return false;
@@ -233,8 +239,14 @@ def dismiss_account_picker(scope, nickname: str = "", timeout: float = 12) -> bo
                     items = [e for e in scope.eles(sel, timeout=1) if is_real(e)]
                     items = [e for e in items if (e.text or "").strip()]
                     if items:
+                        if not nickname:
+                            # 实战教训（2026-08-28）：无昵称时盲选第一项会选错账号
+                            # （总包说被重复选中，目标号反而进不去）→ 等用户手选
+                            logging.warning("账号选择弹窗已出现，但目标昵称未知——"
+                                            "请在浏览器中手动选择账号")
+                            continue
                         target = next(
-                            (e for e in items if nickname and nickname in (e.text or "")),
+                            (e for e in items if nickname in (e.text or "")),
                             items[0],
                         )
                         if click_robust(target):
