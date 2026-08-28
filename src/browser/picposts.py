@@ -307,17 +307,41 @@ class PicPostPublisher:
         except Exception:  # noqa: BLE001
             return None
 
+    _A2P_TOAST_VISIBLE_JS = """
+    return (() => {
+      for (const d of document.querySelectorAll('.a2p-loading__toast, [class*=a2p-loading]')) {
+        const r = d.getBoundingClientRect();
+        if (r.width < 20 || r.height < 10) continue;
+        const cs = getComputedStyle(d);
+        if (cs.display !== 'none' && cs.visibility !== 'hidden') return true;
+      }
+      return false;
+    })();
+    """
+
+    def _a2p_toast_visible(self, editor) -> bool:
+        """a2p「草稿加载中」toast 当前是否真可见。
+
+        实战教训（2026-08-28）：该 toast 是常驻 DOM 的隐藏模板——
+        生成完成后文本仍在 HTML 里，子串匹配=永久假阳性（白等8分钟）；
+        反之截断扫描又永远看不见真加载。唯一可靠判据=计算样式可见性。
+        """
+        try:
+            return bool(editor.run_js(self._A2P_TOAST_VISIBLE_JS))
+        except Exception:  # noqa: BLE001
+            return False
+
     def _wait_loading_done(self, editor) -> bool:
-        """等「草稿加载中」弹窗消失。轮询 + 期间检测安全验证。"""
+        """等「草稿加载中」toast 消失（可见性判据 + 安全验证检测）。"""
         deadline = time.time() + self._cfg.贴图.草稿加载等待最长分钟 * 60
         notified_verify = False
         while time.time() < deadline and not self._should_stop():
             time.sleep(10)
             try:
-                body = (editor.html or "")[:30000]
+                body = editor.html or ""
             except Exception:  # noqa: BLE001
                 return True                          # tab 消失视为已跳转
-            if any(m in body for m in PICPOST_LOADING_MARKERS):
+            if self._a2p_toast_visible(editor):
                 logger.info("贴图草稿仍在生成，继续等待（剩余 %.0f 分钟）",
                             (deadline - time.time()) / 60)
                 continue
@@ -329,7 +353,7 @@ class PicPostPublisher:
                         f"账号「{self._account}」请在手机上完成验证，工具会自动继续。",
                     )
                 continue
-            logger.info("贴图草稿加载完成（弹窗已消失）")
+            logger.info("贴图草稿加载完成（toast 已隐藏）")
             return True
         return False
 

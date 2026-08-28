@@ -115,6 +115,12 @@ class BrowserSession:
             raise RuntimeError("BrowserSession 未启动")
         return self._tab
 
+    def new_tab(self, url: str = "") -> Any:
+        """当前浏览器新开 tab（同 profile 共享登录态；贴图编辑器等用）。"""
+        if self._chromium is None:
+            raise RuntimeError("BrowserSession 未启动")
+        return self._chromium.new_tab(url)
+
     def close_stale_mp_tabs(self, keep: Any = None) -> int:
         """关闭除 keep 外所有公众号 tab（僵尸 tab 清场）。
 
