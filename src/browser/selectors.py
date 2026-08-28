@@ -34,6 +34,9 @@ DRAFT_TITLE_SELECTORS: tuple[str, ...] = (
 )
 DRAFT_TIME_SELECTORS: tuple[str, ...] = (
     "css:.weui-desktop-card__meta",
+    # 贴图草稿卡（a2p）实测：日期在 publish__tips（“更新于 14:56”）
+    "css:.weui-desktop-publish__tips",
+    "css:.weui-desktop-tips",
     "css:.appmsg_date",
     "css:.js_create_time",
     "css:.time",

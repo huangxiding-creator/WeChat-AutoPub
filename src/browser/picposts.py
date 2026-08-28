@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import replace
 from typing import Callable, Optional
 
 from ..config import AppConfig
@@ -59,176 +58,56 @@ class PicPostPublisher:
     # —— 入口 ——
 
     def publish_picposts(self) -> list[PublishResult]:
-        """翻最近 N 页发表记录，发布全部未发布的自动生成贴图。
+        """翻最近 N 页发表记录，逐条点「去查看」触发贴图草稿生成。
 
-        实战教训：每发布一条，列表就变化 → 旧快照里的「去查看」入口会失效。
-        因此同一页内循环「重扫 → 发布」直到无新条目，再翻页。
+        实战真相：贴图必须经草稿箱发布——本方法只负责触发生成，
+        真正发布由编排器紧随其后再跑一遍草稿发布器完成。
+        返回结果条目仅表示「触发」成败，不代表发布。
         """
+        results: list[PublishResult] = []
         if not self._open_publish_record():
             return [PublishResult(
                 item=ContentItem(ctype=CONTENT_TYPE_PICPOST, title="<打开发表记录失败>",
                                  content_hash=""),
                 ok=False, detail="无法打开发表记录页面",
             )]
-
-        results: list[PublishResult] = []
+        triggered = 0
         for page in range(1, self._cfg.贴图.翻页数 + 1):
             if self._should_stop():
                 break
             logger.info("扫描发表记录第 %d/%d 页", page, self._cfg.贴图.翻页数)
             scanned: set[str] = set()
             while not self._should_stop():
-                todo: list[str] = []
-                for title in self._find_picpost_entries():
-                    if title in scanned:
-                        continue
-                    scanned.add(title)
-                    if self._state.is_published(
-                        self._account, CONTENT_TYPE_PICPOST,
-                        content_hash(CONTENT_TYPE_PICPOST, title, self._account),
-                    ):
-                        logger.info("贴图《%s》已发布过，跳过", title[:30])
-                        continue
-                    todo.append(title)
+                todo = [t for t in self._find_picpost_entries() if t not in scanned]
+                scanned.update(todo)
                 if not todo:
-                    break                          # 本页无新贴图
-                if (self._state.today_published_count(self._account)
-                        >= self._cfg.账号.单账号单日最大发布数):
-                    logger.warning("单日熔断触发，停止贴图发布")
-                    return results
+                    break
                 for title in todo:
-                    results.append(self._publish_one(title))
-                    # 发布后列表变化 → 菜单路径重开记录页
+                    ok, detail = self._trigger_picpost_draft(title)
+                    triggered += 1 if ok else 0
+                    results.append(PublishResult(
+                        item=ContentItem(ctype=CONTENT_TYPE_PICPOST, title=title,
+                                         content_hash=content_hash(
+                                             CONTENT_TYPE_PICPOST, title, self._account)),
+                        ok=ok, detail=detail,
+                    ))
                     if not self._open_publish_record():
+                        logger.warning("记录页重开失败，停止触发")
                         return results
             if not self._goto_next_page():
                 logger.info("没有更多页，停止翻页")
                 break
+        logger.info("贴图草稿触发完成：%d 条（等待草稿发布器发布）", triggered)
         return results
 
-    # —— 页面操作 ——
+    def _trigger_picpost_draft(self, title: str) -> tuple[bool, str]:
+        """点该条目「去查看」打开编辑器并等待草稿生成，然后关闭。
 
-    def _open_publish_record(self) -> bool:
-        """菜单路径打开发表记录（共享 nav 实现；直达 URL 是登录壳死路）。"""
-        from . import nav
-        return nav.open_publish_record(self._s)
-
-    def _find_picpost_entries(self) -> list[str]:
-        """找当前页所有「已自动生成贴图草稿」条目的标题。"""
-        tab = self._s.tab
-        titles: list[str] = []
-        for entry_text in PICPOST_ENTRY_TEXTS:
-            try:
-                els = [e for e in tab.eles(f"text:{entry_text}", timeout=3) if is_real(e)]
-            except Exception:  # noqa: BLE001
-                continue
-            for el in els:
-                titles.append(self._extract_entry_title(el))
-            if titles:
-                self._archive_page(tab, len(titles))
-                logger.info("找到 %d 条自动生成贴图草稿", len(titles))
-                return titles
-        return []
-
-    def _archive_page(self, tab, n: int) -> None:
-        """存档记录页 HTML（标题结构漂移时离线分析用）。"""
-        try:
-            from ..constants import RECON_DIR
-            RECON_DIR.mkdir(parents=True, exist_ok=True)
-            (RECON_DIR / "pic_entries_page.html").write_text(
-                tab.html or "", encoding="utf-8")
-            logger.debug("贴图条目页已存档（%d 条）", n)
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _extract_entry_title(self, marker_el) -> str:
-        """从「已自动生成贴图草稿」标记元素向上提取条目标题。"""
-        try:
-            node = marker_el
-            for _ in range(5):                     # 最多向上5层找标题
-                parent = node.parent()
-                if not is_real(parent):
-                    break
-                title_el = None
-                for sel in ("css:.title", "css:.weui-desktop-media__title", "css:h3", "css:h4"):
-                    try:
-                        t = parent.ele(sel, timeout=0.5)
-                        if is_real(t) and t.text and t.text.strip():
-                            title_el = t
-                            break
-                    except Exception:  # noqa: BLE001
-                        continue
-                if title_el:
-                    return title_el.text.strip()[:60]
-                node = parent
-            return (marker_el.text or "").strip()[:40] or "贴图条目"
-        except Exception:  # noqa: BLE001
-            return "贴图条目"
-
-    def _goto_next_page(self) -> bool:
-        for sel in NEXT_PAGE_SELECTORS:
-            try:
-                el = self._s.tab.ele(sel, timeout=2)
-                if is_real(el):
-                    cls = (el.attr("class") or "")
-                    if "disabled" in cls:
-                        return False
-                    if click_robust(el):
-                        self._s.wait_ready(timeout=10)
-                        return True
-            except Exception:  # noqa: BLE001
-                continue
-        return False
-
-    # —— 单条发布 ——
-
-    def _publish_one(self, title: str) -> PublishResult:
-        chash = content_hash(CONTENT_TYPE_PICPOST, title, self._account)
-        item = ContentItem(ctype=CONTENT_TYPE_PICPOST, title=title, content_hash=chash)
-        logger.info("[%s] 开始发布贴图《%s》", self._account, title[:30])
-        self._state.upsert(account=self._account, ctype=CONTENT_TYPE_PICPOST,
-                           chash=chash, title=title, status="pending")
-        evidence = self._s.screenshot_evidence("pic_before")
-
-        try:
-            ok, detail = self._do_publish_flow(title)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("发布贴图异常")
-            ok, detail = False, f"异常: {exc}"
-
-        evidence_after = self._s.screenshot_evidence("pic_after")
-        ev = evidence_after or evidence
-
-        if ok:
-            self._state.mark_published(account=self._account, ctype=CONTENT_TYPE_PICPOST,
-                                       chash=chash, title=title, evidence=ev)
-        else:
-            self._state.upsert(account=self._account, ctype=CONTENT_TYPE_PICPOST,
-                               chash=chash, title=title, status="failed", detail=detail)
-        if self._notifier:
-            mark = "✅" if ok else "❌"
-            self._notifier.send_text(
-                f"{mark} [{self._account}] 贴图《{title[:40]}》"
-                + ("已发布" if ok else f"失败: {detail[:50]}")
-            )
-
-        return PublishResult(item=replace(item, detail=detail), ok=ok,
-                             detail=detail, evidence=ev)
-
-    def _do_publish_flow(self, title: str) -> tuple[bool, str]:
-        """找到该条目 →「去查看」→ 等加载 → 编辑器内「发表」×2 → 验证。
-
-        实战教训（2026-08-28）：
-        - 贴图编辑器是新 tab，URL 为 appmsg_edit_v2（与文章编辑器同源组件）
-          → 找 tab 必须匹配 "appmsg_edit"，猜的 appmsgalbum/picPage 永远 miss。
-        - 发表确认弹窗与草稿发布同款（new_mass_send_dialog 双「发表」）。
+        绝不点任何「发表/保存」按钮——点击会触发 a2p create（生成草稿）
+        或其它副作用；打开-等待-关闭本身就完成了草稿生成。
         """
-        from . import nav
-        from .safety import assert_button_safe
         from .session import human_pause
         tab = self._s.tab
-
-        # —— 1. 定位该条目的「去查看」 ——
         view_link = None
         for entry_text in PICPOST_ENTRY_TEXTS:
             try:
@@ -262,56 +141,123 @@ class PicPostPublisher:
             return False, "未找到该贴图的「去查看」入口"
         if not click_robust(view_link):
             return False, "点击「去查看」失败"
-        self._s.wait_ready(timeout=20)
-        human_pause()
 
-        # —— 2. 等贴图编辑器新 tab（实测 URL: appmsg_edit_v2）——
+        # 等编辑器 tab 打开（实测 appmsg_edit_v2），给草稿生成留时间
         editor = None
         deadline = time.time() + 15
         while time.time() < deadline and editor is None:
             editor = (self._s.find_tab_on("appmsg_edit")
-                      or self._s.find_tab_on("appmsgalbum")
-                      or self._s.find_tab_on("picPage"))
+                      or self._s.find_tab_on("appmsgalbum"))
             if editor is None:
                 time.sleep(1.5)
         if editor is None:
-            return False, "「去查看」未打开编辑器页（15秒内无新 tab）"
-        logger.info("贴图编辑器 tab: %s", (editor.url or "")[:70])
+            return False, "「去查看」未打开编辑器页"
+        logger.info("贴图编辑器已打开，等待草稿生成: %s", (editor.url or "")[:60])
         try:
-            # —— 3. 智能等待「草稿加载中」消失（最长 N 分钟，默认 6）——
-            if not self._wait_loading_done(editor):
-                return False, "贴图草稿加载超时（弹窗未消失）"
-            nav.dismiss_account_picker(editor, self._account)
-            human_pause()
-
-            # —— 4. 发表：弹窗预开则直接点；否则先点编辑器底栏「发表」——
-            assert_button_safe("发表")
-            dialog_scope = ".new_mass_send_dialog, .weui-desktop-dialog, [class*=dialog]"
-            if not nav.js_click_visible_text(editor, "发表", timeout=8, scope_css=dialog_scope):
-                # 弹窗未预开 → 点编辑器底栏「发表」唤出弹窗
-                toolbar_scope = ".mass_send, .tool_bar, [class*=publish], .footer"
-                if not (nav.js_click_visible_text(editor, "发表", timeout=10, scope_css=toolbar_scope)
-                        or nav.js_click_visible_text(editor, "发表", timeout=10)):
-                    return False, "未找到贴图「发表」按钮"
-                if not nav.js_click_visible_text(editor, "发表", timeout=25, scope_css=dialog_scope):
-                    return False, "弹窗「发表」未点中"
-            human_pause(1.5, 3.0)
-            # 第二屏确认（按钮也叫「发表」，「继续发表」兜底；缺省也可接受）
-            if not (nav.js_click_visible_text(editor, "发表", timeout=20, scope_css=dialog_scope)
-                    or nav.js_click_visible_text(editor, "继续发表", timeout=8, scope_css=dialog_scope)):
-                logger.warning("贴图第二个确认按钮未出现——可能单次确认即提交")
-            human_pause()
-            if self._s.capture:
-                self._s.capture.drain("pic_publish")
-            return self._verify_published(editor)
+            self._wait_loading_done(editor)      # 等加载弹窗消失（最长6分钟）
+            time.sleep(5)                         # 多留渲染余量
+            return True, "已触发贴图草稿生成"
         finally:
             try:
-                if editor is not tab and "appmsgpublish" not in (editor.url or ""):
+                if editor is not tab:
                     editor.close()
                     time.sleep(1.0)
             except Exception:  # noqa: BLE001
                 pass
-            self._open_publish_record()
+
+    # —— 页面操作 ——
+
+    def _open_publish_record(self) -> bool:
+        """菜单路径打开发表记录（共享 nav 实现；直达 URL 是登录壳死路）。"""
+        from . import nav
+        return nav.open_publish_record(self._s)
+
+    def _find_picpost_entries(self) -> list[str]:
+        """找当前页所有「已自动生成贴图草稿」条目的标题。"""
+        tab = self._s.tab
+        titles: list[str] = []
+        for entry_text in PICPOST_ENTRY_TEXTS:
+            try:
+                els = [e for e in tab.eles(f"text:{entry_text}", timeout=3) if is_real(e)]
+            except Exception:  # noqa: BLE001
+                continue
+            for el in els:
+                t = self._extract_entry_title(el)
+                if t:
+                    titles.append(t)
+                else:
+                    logger.warning("一条贴图草稿标题提取失败，跳过（选择器待更新）")
+            if titles:
+                self._archive_page(tab, len(titles))
+                logger.info("找到 %d 条自动生成贴图草稿", len(titles))
+                return titles
+        return []
+
+    def _archive_page(self, tab, n: int) -> None:
+        """存档记录页 HTML（标题结构漂移时离线分析用）。"""
+        try:
+            from ..constants import RECON_DIR
+            RECON_DIR.mkdir(parents=True, exist_ok=True)
+            (RECON_DIR / "pic_entries_page.html").write_text(
+                tab.html or "", encoding="utf-8")
+            logger.debug("贴图条目页已存档（%d 条）", n)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _ENTRY_TITLE_SELECTORS: tuple[str, ...] = (
+        "css:.weui-desktop-mass-appmsg__title span",   # 实测：记录条目文章标题
+        "css:.weui-desktop-mass-appmsg__title",
+        "css:.weui-desktop-card__title",
+        "css:.weui-desktop-media__title",
+        "css:.title",
+        "css:h3", "css:h4",
+    )
+
+    def _extract_entry_title(self, marker_el) -> str:
+        """从「已自动生成贴图草稿」标记向上找条目块，取文章标题。
+
+        实测 DOM（2026-08-28）：标记 span.article-to-image-tips__status 在
+        div.article-to-image-tips（记录条目块尾部）；标题在块内
+        a.weui-desktop-mass-appmsg__title > span，含「原创」兄弟标签需剔除。
+        提取失败返回空串（调用方跳过该条）——绝不能把标记文本当标题，
+        否则多条贴图同名互相误去重（实战踩过）。
+        """
+        try:
+            node = marker_el
+            for _ in range(8):                     # 最多向上8层找条目块
+                parent = node.parent()
+                if not is_real(parent):
+                    break
+                for sel in self._ENTRY_TITLE_SELECTORS:
+                    try:
+                        t = parent.ele(sel, timeout=0.3)
+                        if is_real(t) and (t.text or "").strip():
+                            txt = t.text.strip().replace("原创", "").strip()
+                            if txt:
+                                return txt[:60]
+                    except Exception:  # noqa: BLE001
+                        continue
+                node = parent
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    def _goto_next_page(self) -> bool:
+        for sel in NEXT_PAGE_SELECTORS:
+            try:
+                el = self._s.tab.ele(sel, timeout=2)
+                if is_real(el):
+                    cls = (el.attr("class") or "")
+                    if "disabled" in cls:
+                        return False
+                    if click_robust(el):
+                        self._s.wait_ready(timeout=10)
+                        return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    # —— 单条发布 ——
 
     def _title_of_entry(self, el) -> str:
         return self._extract_entry_title(el)
@@ -321,15 +267,6 @@ class PicPostPublisher:
             return el.parent(3)
         except Exception:  # noqa: BLE001
             return None
-
-    def _click_confirm(self, editor) -> None:
-        for sel in CONFIRM_PUBLISH_SELECTORS:
-            try:
-                el = editor.ele(sel, timeout=3)
-                if is_real(el) and click_robust(el):
-                    return
-            except Exception:  # noqa: BLE001
-                continue
 
     def _wait_loading_done(self, editor) -> bool:
         """等「草稿加载中」弹窗消失。轮询 + 期间检测安全验证。"""
@@ -357,20 +294,3 @@ class PicPostPublisher:
             return True
         return False
 
-    def _verify_published(self, editor) -> tuple[bool, str]:
-        for _ in range(20):
-            time.sleep(1.5)
-            if self._should_stop():
-                return False, "用户停止"
-            try:
-                body = (editor.html or "")[:20000]
-            except Exception:  # noqa: BLE001
-                return True, "页面已跳转（视为成功，稍后人工核对）"
-            if any(m in body for m in PUBLISH_SUCCESS_MARKERS):
-                return True, "页面出现发表成功标记"
-            try:
-                if "appmsgpublish" in (editor.url or ""):
-                    return True, "已返回发表记录页"
-            except Exception:  # noqa: BLE001
-                return True, "页面已关闭（视为成功）"
-        return False, "未检测到贴图发表成功"

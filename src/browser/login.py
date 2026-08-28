@@ -72,6 +72,7 @@ def ensure_login(
     poll_interval: float = 3.0,
     remind_interval: float = 120.0,
     on_action_needed: Callable[[str, str], None] | None = None,
+    target_nickname: str = "",
 ) -> LoginResult:
     """确保已登录。cookie 有效直接复用；否则等扫码（企微提醒）。
 
@@ -87,7 +88,7 @@ def ensure_login(
         # cookie 复用路径同样可能弹「选择账号登录」
         try:
             from . import nav
-            nav.dismiss_account_picker(session.tab, nickname)
+            nav.dismiss_account_picker(session.tab, target_nickname or nickname)
         except Exception as exc:  # noqa: BLE001
             logger.debug("账号选择弹窗检查失败: %s", exc)
         logger.info("cookie 有效，免扫码登录 nickname=%s token=%s", nickname, token[:6] + "…")
@@ -132,6 +133,14 @@ def ensure_login(
     last_remind = time.time()
     while time.time() < deadline:
         time.sleep(poll_interval)
+        if target_nickname:
+            # 扫码确认后可能弹「选择账号登录」——自动选目标号
+            try:
+                from . import nav
+                nav.dismiss_account_picker(session.tab, target_nickname,
+                                           timeout=2)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("扫码等待中选择弹窗处理失败: %s", exc)
         try:
             url = session.tab.url or ""
         except Exception:  # noqa: BLE001
@@ -142,7 +151,7 @@ def ensure_login(
             # 微信绑定多公众号时，登录后可能弹「选择账号登录」→ 自动选目标账号
             try:
                 from . import nav
-                nav.dismiss_account_picker(session.tab, nickname)
+                nav.dismiss_account_picker(session.tab, target_nickname or nickname)
                 nickname = extract_nickname(session) or nickname
             except Exception as exc:  # noqa: BLE001 — 弹窗处理失败不阻塞登录
                 logger.debug("登录后账号选择弹窗检查失败: %s", exc)

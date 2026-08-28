@@ -48,11 +48,14 @@ class Orchestrator:
 
     def run(self) -> list[AccountReport]:
         reports: list[AccountReport] = []
+        handled: set[str] = set()          # 本次运行已处理的实时昵称
         for idx, profile in enumerate(self._profile_plan(), start=1):
             if self._should_stop():
                 logger.info("收到停止信号，收工")
                 break
-            report = self._process_account(profile, idx)
+            report, was_dup = self._process_account(profile, idx, handled)
+            if was_dup:
+                continue                    # 重复账号：跳过但不断链
             if report is None:
                 # 登录失败/超时：账号链自然结束（无人扫码即收工）
                 logger.info("账号链结束（%s 未登录）", profile)
@@ -65,13 +68,16 @@ class Orchestrator:
 
     # —— 账号处理（会话内闭环：登录→发布→登出→退出）——
 
-    def _process_account(self, profile: str, index: int) -> Optional[AccountReport]:
+    def _process_account(
+        self, profile: str, index: int, handled: set[str],
+        target_nickname: str = "",
+    ) -> tuple[Optional[AccountReport], bool]:
         session = BrowserSession(self._cfg, profile)
         try:
             session.start()
         except RuntimeError as exc:
             logger.warning("[%s] 浏览器会话启动失败，跳过该账号: %s", profile, exc)
-            return None
+            return None, False
         try:
             def _on_action(action: str, detail: str) -> None:
                 if self._notifier:
@@ -81,33 +87,112 @@ class Orchestrator:
                 session,
                 timeout_minutes=self._cfg.账号.登录等待扫码超时分钟,
                 on_action_needed=_on_action,
+                target_nickname=target_nickname,
+            )
+            if not login.ok:
+                logger.warning("[%s] 登录失败: %s", profile, login.detail)
+                return None, False
+
+            nickname = login.nickname or f"账号{index}"
+            self._state.register_profile(profile, nickname)
+            if nickname in handled:
+                # 实时判重（历史存档昵称可能过期：浏览器里换号登录后，
+                # 旧存档昵称会误导静态去重跳过本该处理的账号）
+                logger.info("[%s] %s 已由其它档案处理过，跳过", profile, nickname)
+                return None, True
+            handled.add(nickname)
+            return self._run_account_pipeline(session, profile, nickname,
+                                              index), False
+        finally:
+            # 浏览器为独立常驻进程：不退出（登录态跨天存活），只断开本次接管
+            session.stop()
+
+    def _run_account_pipeline(self, session: BrowserSession, profile: str,
+                              nickname: str, index: int) -> AccountReport:
+        """账号内闭环：草稿发布 → 贴图触发 → 贴图草稿再发布一轮。"""
+        account = AccountInfo(index=index, nickname=nickname)
+
+        drafts = DraftPublisher(
+            session, self._cfg, self._state, self._notifier,
+            account_name=nickname, should_stop=self._should_stop,
+        ).publish_recent_drafts()
+
+        picposts = PicPostPublisher(
+            session, self._cfg, self._state, self._notifier,
+            account_name=nickname, should_stop=self._should_stop,
+        ).publish_picposts()
+
+        # 贴图草稿由上面的「去查看」触发生成，落在草稿箱里——
+        # 用已实战验证的草稿发布链再发布一轮（贴图即今日新草稿）
+        picposts_drafts: list = []
+        if any(r.ok for r in picposts):
+            picposts_drafts = DraftPublisher(
+                session, self._cfg, self._state, self._notifier,
+                account_name=nickname, should_stop=self._should_stop,
+            ).publish_recent_drafts()
+            picposts = picposts + picposts_drafts
+
+        # 永不登出：每账号独立浏览器实例，切换账号=切换浏览器，
+        # 登出只会销毁登录态、换来明天再扫码（用户核心诉求=少扫码）
+        logger.info("[%s] %s 草稿+贴图全部完成，保留登录态（不登出）",
+                    profile, nickname)
+        return AccountReport(account=account, results=tuple(drafts + picposts))
+
+    def run_for_profile(self, profile: str, target_nickname: str = "",
+                        index: int = 99) -> Optional[AccountReport]:
+        """旁路入口：单档案完整管线（注册新号/补跑，不动 run.py 主链）。
+
+        target_nickname 非空时启用错号守卫：扫码后登进来的若不是目标号
+        （平台会自动沿用上次账号），提示用户点右上角头像菜单切换账号；
+        轮询期间自动点掉「选择账号登录」弹窗里的目标项。
+        """
+        session = BrowserSession(self._cfg, profile)
+        try:
+            session.start()
+        except RuntimeError as exc:
+            logger.warning("[%s] 浏览器会话启动失败: %s", profile, exc)
+            return None
+
+        def _on_action(action: str, detail: str) -> None:
+            if self._notifier:
+                self._notifier.send_action_needed(action, detail)
+            logger.info("[%s] 需要人工: %s — %s", profile, action, detail)
+
+        try:
+            login = ensure_login(
+                session,
+                timeout_minutes=self._cfg.账号.登录等待扫码超时分钟,
+                on_action_needed=_on_action,
+                target_nickname=target_nickname,
             )
             if not login.ok:
                 logger.warning("[%s] 登录失败: %s", profile, login.detail)
                 return None
+            nickname = login.nickname or profile
 
-            nickname = login.nickname or f"账号{index}"
-            account = AccountInfo(index=index, nickname=nickname)
+            if target_nickname and target_nickname not in nickname:
+                logger.warning(
+                    "[%s] 登进来的是「%s」不是目标「%s」——请在浏览器右上角"
+                    "头像菜单切换账号，弹出的选择框会自动点（等 5 分钟）",
+                    profile, nickname, target_nickname)
+                import time as _time
+                from ..browser import nav
+                from ..browser.login import extract_nickname
+                deadline = _time.time() + 300
+                while _time.time() < deadline:
+                    nav.dismiss_account_picker(session.tab, target_nickname,
+                                               timeout=4)
+                    nickname = extract_nickname(session) or nickname
+                    if target_nickname in nickname:
+                        logger.info("[%s] 已切换到目标账号 %s",
+                                    profile, nickname)
+                        break
+                    _time.sleep(5)
+
             self._state.register_profile(profile, nickname)
-
-            drafts = DraftPublisher(
-                session, self._cfg, self._state, self._notifier,
-                account_name=nickname, should_stop=self._should_stop,
-            ).publish_recent_drafts()
-
-            picposts = PicPostPublisher(
-                session, self._cfg, self._state, self._notifier,
-                account_name=nickname, should_stop=self._should_stop,
-            ).publish_picposts()
-
-            # 永不登出：每账号独立浏览器实例，切换账号=切换浏览器，
-            # 登出只会销毁登录态、换来明天再扫码（用户核心诉求=少扫码）
-            logger.info("[%s] %s 草稿+贴图全部完成，保留登录态（不登出）",
-                        profile, nickname)
-
-            return AccountReport(account=account, results=tuple(drafts + picposts))
+            return self._run_account_pipeline(session, profile, nickname,
+                                              index)
         finally:
-            # 浏览器为独立常驻进程：不退出（登录态跨天存活），只断开本次接管
             session.stop()
 
     # —— 计划 ——
@@ -121,13 +206,9 @@ class Orchestrator:
         """
         registered = self._state.list_profiles()      # [(profile, nickname)]
         deduped: list[str] = []
-        seen: set[str] = set()
-        for profile, nickname in registered:
-            if nickname and nickname in seen:
-                logger.info("跳过重复档案 %s（%s 已由其它档案处理）", profile, nickname)
-                continue
-            if nickname:
-                seen.add(nickname)
+        for profile, _nickname in registered:
+            # 不做静态昵称去重——存档昵称可能过期（浏览器里换号后失效），
+            # 改为登录后按实时昵称判重（见 _process_account 的 handled）
             deduped.append(profile)
         if not deduped:
             return ["acct01"]
