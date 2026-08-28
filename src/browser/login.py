@@ -91,7 +91,8 @@ def ensure_login(
         except Exception as exc:  # noqa: BLE001
             logger.debug("账号选择弹窗检查失败: %s", exc)
         logger.info("cookie 有效，免扫码登录 nickname=%s token=%s", nickname, token[:6] + "…")
-        session.minimize_window()          # 不打扰用户桌面
+        session.minimize_window()
+        session.start_minimize_watchdog()          # 不打扰用户桌面
         return LoginResult(ok=True, nickname=nickname, token=token)
 
     def _notify(action: str, detail: str) -> None:
@@ -118,6 +119,7 @@ def ensure_login(
                 logger.info("一键「登录」恢复会话成功 nickname=%s", nickname)
                 session.retarget_capture()
                 session.minimize_window()
+                session.start_minimize_watchdog()
                 return LoginResult(ok=True, nickname=nickname,
                                    token=extract_token(url))
             logger.info("一键「登录」未恢复会话，转扫码流程")
@@ -147,6 +149,7 @@ def ensure_login(
             logger.info("扫码登录成功 nickname=%s token=%s", nickname, token[:6] + "…")
             session.retarget_capture()      # 监听挂到登录后的活跃 tab
             session.minimize_window()       # 扫码完成，归还桌面
+            session.start_minimize_watchdog()
             return LoginResult(ok=True, nickname=nickname, token=token)
         if time.time() - last_remind >= remind_interval:
             remain = int((deadline - time.time()) / 60)

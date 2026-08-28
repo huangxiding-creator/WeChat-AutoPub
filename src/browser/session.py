@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,8 @@ class BrowserSession:
         self._chromium: Optional[Chromium] = None
         self._tab: Any = None
         self.capture: Any = None            # PacketCapture（接口侦察）
+        self._mini_watchdog: Optional[threading.Thread] = None
+        self._watchdog_stop = threading.Event()
 
     # —— 生命周期 ——
 
@@ -97,6 +100,7 @@ class BrowserSession:
 
     def stop(self) -> None:
         """停止会话引用。浏览器是独立常驻进程——**绝不退出**，登录态跨运行存活。"""
+        self._watchdog_stop.set()         # 停最小化看门狗
         if self.capture is not None:
             try:
                 self.capture.stop()
@@ -169,6 +173,42 @@ class BrowserSession:
         if self._chromium is None:
             raise RuntimeError("BrowserSession 未启动")
         return self._chromium
+
+    def minimize_window(self) -> None:
+        """最小化浏览器窗口（用户要求：运行时不抢占桌面焦点）。
+
+        CDP 点击/JS 不依赖窗口可见，最小化不影响自动化。
+        """
+        try:
+            self._tab.set.window.mini()
+            logger.info("[%s] 浏览器窗口已最小化", self._profile_name)
+        except Exception as exc:  # noqa: BLE001 — 最小化失败不影响主流程
+            logger.debug("窗口最小化失败: %s", exc)
+
+    def start_minimize_watchdog(self, interval: float = 10.0) -> None:
+        """运行期间持续把浏览器窗口压回最小化（用户红线：不抢桌面）。
+
+        hover/导航等操作偶发把窗口唤到前台；CDP 自动化不受最小化
+        影响（2026-08-28 三篇贴图均在最小化状态下发布成功）。
+        """
+        if self._mini_watchdog is not None and self._mini_watchdog.is_alive():
+            return
+        self._watchdog_stop.clear()
+        self._mini_watchdog = threading.Thread(
+            target=self._mini_loop, args=(interval,),
+            name=f"mini-{self._profile_name}", daemon=True)
+        self._mini_watchdog.start()
+        logger.info("[%s] 最小化看门狗已启动（每 %.0f 秒）",
+                    self._profile_name, interval)
+
+    def _mini_loop(self, interval: float) -> None:
+        while not self._watchdog_stop.is_set():
+            try:
+                if self._tab is not None:
+                    self._tab.set.window.mini()
+            except Exception:  # noqa: BLE001 — 窗口可能已关
+                pass
+            self._watchdog_stop.wait(interval)
 
     # —— tab 定位 ——
 
