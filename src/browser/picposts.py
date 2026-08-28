@@ -182,23 +182,23 @@ class PicPostPublisher:
         assert_button_safe("保存为草稿")
         deadline = time.time() + timeout
         while time.time() < deadline:
-            try:
-                for e in editor.eles(("tag:button", "css:.weui-desktop-btn"),
-                                     timeout=1):
-                    try:
-                        w, _h = e.rect.size
-                        if not w or w < 40:
+            for sel in ("tag:button", "css:.weui-desktop-btn"):
+                try:
+                    for e in editor.eles(sel, timeout=1):
+                        try:
+                            w, _h = e.rect.size
+                            if not w or w < 40:
+                                continue
+                            if ((e.text or "").strip() == "保存为草稿"
+                                    and e.states.is_displayed):
+                                e.click()
+                                logger.info("已点击「保存为草稿」（贴图落箱）")
+                                time.sleep(3)
+                                return True
+                        except Exception:  # noqa: BLE001 — 单元素失败跳过
                             continue
-                        if ((e.text or "").strip() == "保存为草稿"
-                                and e.states.is_displayed):
-                            e.click()
-                            logger.info("已点击「保存为草稿」（贴图落箱）")
-                            time.sleep(3)
-                            return True
-                    except Exception:  # noqa: BLE001 — 单元素失败跳过
-                        continue
-            except Exception:  # noqa: BLE001
-                pass
+                except Exception:  # noqa: BLE001
+                    continue
             time.sleep(1.5)
         logger.warning("「保存为草稿」按钮未出现（可能已自动落箱的旧变体）")
         return False
