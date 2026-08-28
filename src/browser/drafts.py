@@ -185,11 +185,13 @@ class DraftPublisher:
         notifier: Optional[WecomNotifier],
         account_name: str,
         should_stop: Callable[[], bool] = lambda: False,
+        gap_range: Optional[tuple[float, float]] = None,
     ) -> None:
         self._s = session
         self._cfg = config
         self._state = state
         self._notifier = notifier
+        self._gap_range = gap_range      # 贴图批清等场景的专用篇间间隔
         self._account = account_name
         self._should_stop = should_stop
 
@@ -229,9 +231,15 @@ class DraftPublisher:
                 if empty_streak >= 3:
                     logger.warning("连续 3 次解析到 0 张草稿卡片，结束本轮（url=%s）", cur)
                     break
-                logger.warning("第 %d 次解析到 0 张草稿卡片，重开草稿箱重试（url=%s）",
+                logger.warning("第 %d 次解析到 0 张草稿卡片，刷新页面重试（url=%s）",
                                empty_streak, cur)
-                self._open_draft_box()
+                try:                       # 先轻量刷新（SPA 假死常见），不行再重开
+                    self._s.tab.refresh()
+                    self._s.wait_ready(timeout=12)
+                except Exception:  # noqa: BLE001
+                    pass
+                if not self._parse_cards():
+                    self._open_draft_box()
                 continue
             empty_streak = 0
             cards = self._filter_recent(parsed)
@@ -293,9 +301,19 @@ class DraftPublisher:
         （如 3/13），据此过滤会误判"无待发草稿"提前收工 →
         双解析取更大结果。
         """
+        # 滚到底再回顶：一次性触发懒加载渲染（替代 2.5 秒盲等双解析——
+        # 实测每周期解析 3 次每次 43 秒，纯解析耗时 3 分钟/篇，是效率瓶颈）
+        tab = self._s.tab
+        try:
+            tab.scroll.to_bottom()
+            time.sleep(1.2)
+            tab.scroll.to_top()
+            time.sleep(0.6)
+        except Exception:  # noqa: BLE001 — 滚动失败不影响解析
+            pass
         cards = self._parse_cards_once()
         if cards:
-            time.sleep(2.5)
+            time.sleep(1.5)
             try:
                 again = self._parse_cards_once()
                 if len(again) > len(cards):
@@ -312,7 +330,7 @@ class DraftPublisher:
         cards: list[DraftCard] = []
         for sel in DRAFT_CARD_SELECTORS:
             try:
-                els = [e for e in tab.eles(sel, timeout=3) if is_real(e)]
+                els = [e for e in tab.eles(sel, timeout=1.2) if is_real(e)]
             except Exception:  # noqa: BLE001
                 continue
             for idx, el in enumerate(els):
@@ -925,7 +943,7 @@ return (() => {
     def _first_text(self, parent: Any, selectors: tuple[str, ...]) -> str:
         for sel in selectors:
             try:
-                el = parent.ele(sel, timeout=1)
+                el = parent.ele(sel, timeout=0.3)
                 if is_real(el) and el.text and el.text.strip():
                     return el.text.strip()
             except Exception:  # noqa: BLE001
@@ -934,7 +952,8 @@ return (() => {
 
     def _polite_wait(self) -> None:
         """3~5 分钟随机间隔（用户指定，INI 可调），支持随时停止。"""
-        lo, hi = self._cfg.草稿.每篇间隔最小秒, self._cfg.草稿.每篇间隔最大秒
+        lo, hi = (self._gap_range
+                  or (self._cfg.草稿.每篇间隔最小秒, self._cfg.草稿.每篇间隔最大秒))
         wait = random.uniform(lo, hi)
         logger.info("拟人间隔 %.0f 秒（%d~%d 随机）", wait, lo, hi)
         deadline = time.time() + wait
