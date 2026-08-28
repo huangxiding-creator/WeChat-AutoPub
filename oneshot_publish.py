@@ -22,6 +22,7 @@ setup_logging()
 
 def main() -> int:
     profile = sys.argv[1] if len(sys.argv) > 1 else "acct01"
+    account = sys.argv[2] if len(sys.argv) > 2 else "总包说"
     cfg = load_config()
     state = StateDB()
     session = BrowserSession(cfg, profile)
@@ -32,7 +33,7 @@ def main() -> int:
             print(f"[{profile}] 会话已失效，退出（不弹码）")
             return 1
         session.start_minimize_watchdog()   # 运行期间窗口始终保持最小化
-        pub = DraftPublisher(session, cfg, state, None, account_name="总包说")
+        pub = DraftPublisher(session, cfg, state, None, account_name=account)
         results = pub.publish_recent_drafts()
         for r in results:
             mark = "OK " if r.ok else "FAIL"

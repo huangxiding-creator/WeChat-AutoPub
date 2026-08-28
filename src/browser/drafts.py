@@ -287,7 +287,27 @@ class DraftPublisher:
         return False
 
     def _parse_cards(self) -> list[DraftCard]:
-        """解析当前页草稿卡片（标题 + 时间）。"""
+        """解析当前页草稿卡片（标题 + 时间）。
+
+        列表懒加载陷阱（2026-08-28 实战）：首解析常只拿到部分卡片
+        （如 3/13），据此过滤会误判"无待发草稿"提前收工 →
+        双解析取更大结果。
+        """
+        cards = self._parse_cards_once()
+        if cards:
+            time.sleep(2.5)
+            try:
+                again = self._parse_cards_once()
+                if len(again) > len(cards):
+                    logger.info("二次解析拿到更多卡片 %d→%d（懒加载）",
+                                len(cards), len(again))
+                    cards = again
+            except Exception:  # noqa: BLE001 — 二次解析失败用首次结果
+                pass
+        return cards
+
+    def _parse_cards_once(self) -> list[DraftCard]:
+        """单次解析草稿卡片。"""
         tab = self._s.tab
         cards: list[DraftCard] = []
         for sel in DRAFT_CARD_SELECTORS:

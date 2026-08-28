@@ -156,7 +156,14 @@ class PicPostPublisher:
         try:
             self._wait_loading_done(editor)      # 等加载弹窗消失（最长6分钟）
             time.sleep(5)                         # 多留渲染余量
-            return True, "已触发贴图草稿生成"
+            # 变体差异（2026-08-28 探针实测）：a2p 编辑器
+            # appmsg_edit_v2?isNew=1&createType=8（工程行业大脑）不会
+            # 自动把贴图存进草稿箱，编辑器里有「保存为草稿」按钮——
+            # 盯 120 秒无任何自动保存迹象。必须真实点击它，贴图卡
+            # 才会出现在草稿箱（总包说的旧变体是自动落箱）。
+            if self._click_save_draft(editor):
+                return True, "已保存贴图草稿到草稿箱"
+            return True, "已触发贴图草稿生成（未见「保存为草稿」按钮，可能已自动落箱）"
         finally:
             try:
                 if editor is not tab:
@@ -165,7 +172,39 @@ class PicPostPublisher:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _click_save_draft(self, editor: Any, timeout: float = 20.0) -> bool:
+        """真实点击编辑器「保存为草稿」（isNew=1 变体贴图落箱必需）。
+
+        沿用实战教训：run_js 合成点击对 Vue 页面可能无效，用
+        DrissionPage 元素点击走 CDP 真实事件。
+        """
+        from .safety import assert_button_safe
+        assert_button_safe("保存为草稿")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                for e in editor.eles(("tag:button", "css:.weui-desktop-btn"),
+                                     timeout=1):
+                    try:
+                        w, _h = e.rect.size
+                        if not w or w < 40:
+                            continue
+                        if ((e.text or "").strip() == "保存为草稿"
+                                and e.states.is_displayed):
+                            e.click()
+                            logger.info("已点击「保存为草稿」（贴图落箱）")
+                            time.sleep(3)
+                            return True
+                    except Exception:  # noqa: BLE001 — 单元素失败跳过
+                        continue
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(1.5)
+        logger.warning("「保存为草稿」按钮未出现（可能已自动落箱的旧变体）")
+        return False
+
     # —— 页面操作 ——
+
 
     def _open_publish_record(self) -> bool:
         """菜单路径打开发表记录（共享 nav 实现；直达 URL 是登录壳死路）。"""
