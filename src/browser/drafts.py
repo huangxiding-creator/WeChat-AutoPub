@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
 from ..config import AppConfig
-from ..constants import CONTENT_TYPE_DRAFT, MP_BASE_URL
+from ..constants import CONTENT_TYPE_DRAFT, CONTENT_TYPE_PICPOST, MP_BASE_URL
 from ..core.models import ContentItem, PublishResult
 from ..core.state import StateDB, content_hash
 from ..notify.wecom import WecomNotifier
@@ -84,10 +84,15 @@ class DraftCard:
     title: str
     time_text: str
     index: int                      # 在当前列表页中的序号（每篇发布后重新解析）
+    is_picpost: bool = False        # 贴图草稿（贴图tab权威标记 / 时间-only启发式）
 
     @property
     def chash(self) -> str:
-        return content_hash(CONTENT_TYPE_DRAFT, self.title)
+        # 贴图独立命名空间：贴图草稿与源文章同名（实战必然），共用 draft 哈希
+        # 会让文章发布记录把同名贴图误判"已发"跳过（749.5案/总包之声13张贴图）
+        return content_hash(
+            CONTENT_TYPE_PICPOST if self.is_picpost else CONTENT_TYPE_DRAFT,
+            self.title)
 
 
 # 贴图专用篇间间隔（2026-08-29 用户明令：贴图间隔 1 分钟之内）
@@ -211,8 +216,18 @@ class DraftPublisher:
             )]
 
         results: list[PublishResult] = []
+        results = self._publish_loop(results, picpost_tab=False)
+        results = self._publish_loop(results, picpost_tab=True)
+        return results
+
+    def _publish_loop(self, results: list[PublishResult],
+                      picpost_tab: bool) -> list[PublishResult]:
+        """单tab发布循环（文章tab=窗口过滤；贴图tab=全发+快间隔）。"""
+        if picpost_tab:
+            if not self._open_draft_box() or not self._ensure_picpost_tab():
+                return results           # 老UI没有贴图tab，跳过
         empty_streak = 0                    # 连续0卡片次数（页面没加载完≠没草稿）
-        fail_streak = 0                     # 连续发布失败次数（熔断用）                    # 连续0卡片次数（页面没加载完≠没草稿）
+        fail_streak = 0                     # 连续发布失败次数（熔断用）
         while not self._should_stop():
             # 验证环节会把页面带到发表记录页 → 每轮先确保回到草稿箱
             cur = ""
@@ -228,6 +243,9 @@ class DraftPublisher:
                                      content_hash=""),
                     ok=False, detail="发布中途无法返回草稿箱",
                 ))
+                break
+            if picpost_tab and not self._ensure_picpost_tab():
+                logger.warning("贴图tab失活且无法重新切换，结束贴图轮")
                 break
             parsed = self._parse_cards()
             if not parsed:
@@ -246,6 +264,11 @@ class DraftPublisher:
                     self._open_draft_box()
                 continue
             empty_streak = 0
+            if picpost_tab:
+                parsed = [replace(c, is_picpost=True) for c in parsed]
+            else:
+                parsed = [replace(c, is_picpost=True) if self._looks_like_picpost(c)
+                          else c for c in parsed]
             cards = self._filter_recent(parsed)
             pending = [c for c in cards if not self._is_done(c)]
             if not pending:
@@ -264,9 +287,9 @@ class DraftPublisher:
             if result.ok:
                 fail_streak = 0
                 if pending.index(card) < len(pending) - 1:
-                    # 下一张是贴图卡（更新于HH:MM）→ 贴图专用快间隔；文章维持3~5分钟
+                    # 下一张是贴图卡 → 贴图专用快间隔；文章维持3~5分钟
                     nxt = pending[pending.index(card) + 1]
-                    self._polite_wait(fast=self._looks_like_picpost(nxt))      # ← 3~5 分钟随机间隔（用户指定）
+                    self._polite_wait(fast=nxt.is_picpost or self._looks_like_picpost(nxt))
             else:
                 fail_streak += 1
                 if fail_streak >= 3:
@@ -385,7 +408,7 @@ class DraftPublisher:
         cutoff = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
         recent, nodate, pics = [], 0, 0
         for c in cards:
-            if self._looks_like_picpost(c):
+            if c.is_picpost or self._looks_like_picpost(c):
                 recent.append(c)    # 贴图：发布所有的（不限日期）
                 pics += 1
                 continue
@@ -401,7 +424,46 @@ class DraftPublisher:
         return recent
 
     def _is_done(self, card: DraftCard) -> bool:
-        return self._state.is_published(self._account, CONTENT_TYPE_DRAFT, card.chash)
+        ctype = CONTENT_TYPE_PICPOST if card.is_picpost else CONTENT_TYPE_DRAFT
+        return self._state.is_published(self._account, ctype, card.chash)
+
+    def _ensure_picpost_tab(self) -> bool:
+        """新版草稿箱：切到「贴图」tab（URL 参数 item_show_type=8，页面级跳转）。
+
+        实测：点「贴图 13」按钮=整页刷新（ContextLost）；URL 直达最稳。
+        老UI无此tab（直达后仍无卡片变化）由调用方的解析结果兜底。
+        """
+        tab = self._s.tab
+        url = tab.url or ""
+        if "item_show_type=8" in url:
+            return True                    # 已在贴图tab
+        if "action=list" in url and "appmsg" in url and "appmsgpublish" not in url:
+            new_url = re.sub(r"([?&])item_show_type=\d+", r"item_show_type=8", url)
+            if new_url == url:
+                new_url = url + "&item_show_type=8"
+            try:
+                tab.get(new_url)
+                self._s.wait_ready(timeout=15)
+                time.sleep(1.0)
+                if "item_show_type=8" in (tab.url or ""):
+                    return True
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("贴图tab URL直达失败: %s", exc)
+        # 兜底：按钮点击（会整页刷新，必须 wait_ready）
+        try:
+            for el in tab.eles("tag:button", timeout=1.5):
+                txt = (el.text or "").strip()
+                if txt.startswith("贴图"):
+                    el.click()
+                    try:
+                        self._s.wait_ready(timeout=15)
+                    except Exception:  # noqa: BLE001
+                        time.sleep(2.0)
+                    time.sleep(1.0)
+                    return "item_show_type=8" in (tab.url or "")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("贴图tab查找失败: %s", exc)
+        return False
 
     @staticmethod
     def _looks_like_picpost(card: DraftCard) -> bool:
@@ -415,10 +477,12 @@ class DraftPublisher:
     # —— 单篇发布 ——
 
     def _publish_one(self, card: DraftCard) -> PublishResult:
-        item = ContentItem(ctype=CONTENT_TYPE_DRAFT, title=card.title,
+        ctype = CONTENT_TYPE_PICPOST if card.is_picpost else CONTENT_TYPE_DRAFT
+        item = ContentItem(ctype=ctype, title=card.title,
                            content_hash=card.chash)
-        logger.info("[%s] 开始发布草稿《%s》", self._account, card.title[:30])
-        self._state.upsert(account=self._account, ctype=CONTENT_TYPE_DRAFT,
+        logger.info("[%s] 开始发布%s《%s》", self._account,
+                    "贴图" if card.is_picpost else "草稿", card.title[:30])
+        self._state.upsert(account=self._account, ctype=ctype,
                            chash=card.chash, title=card.title, status="pending")
         evidence = self._s.screenshot_evidence(f"draft_{card.index}_before")
 
@@ -432,11 +496,11 @@ class DraftPublisher:
         ev = evidence_after or evidence
 
         if ok:
-            self._state.mark_published(account=self._account, ctype=CONTENT_TYPE_DRAFT,
+            self._state.mark_published(account=self._account, ctype=ctype,
                                        chash=card.chash, title=card.title, evidence=ev)
             self._notify_result(card.title, ok=True)
         else:
-            self._state.upsert(account=self._account, ctype=CONTENT_TYPE_DRAFT,
+            self._state.upsert(account=self._account, ctype=ctype,
                                chash=card.chash, title=card.title, status="failed",
                                detail=detail)
 

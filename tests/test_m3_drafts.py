@@ -93,3 +93,22 @@ def test_filter_recent_custom_week():
     cards = [DraftCard(title="七天前", time_text=week_ago, index=0)]
     assert len(_filter_recent(cards, days=2)) == 0     # 默认2天：不含
     assert len(_filter_recent(cards, days=10)) == 1    # 自定义10天：包含
+
+
+def test_picpost_chash_namespace_split():
+    """贴图与源文章同名——chash 必须分命名空间，否则文章发布记录误杀同名贴图。"""
+    from src.browser.drafts import DraftCard
+    art = DraftCard(title="EPC指南", time_text="更新于 08月11日", index=1)
+    pic = DraftCard(title="EPC指南", time_text="更新于 08月11日", index=1,
+                    is_picpost=True)
+    assert art.chash != pic.chash
+    assert art.is_picpost is False and pic.is_picpost is True
+
+
+def test_looks_like_picpost_heuristic():
+    from src.browser.drafts import DraftCard, DraftPublisher
+    f = DraftPublisher._looks_like_picpost
+    assert f(DraftCard(title="x", time_text="更新于 15:06", index=1))
+    assert not f(DraftCard(title="x", time_text="更新于 08月11日", index=1))
+    assert not f(DraftCard(title="x", time_text="更新于 昨天 20:32", index=1))
+    assert not f(DraftCard(title="x", time_text="今天 09:00", index=1))
