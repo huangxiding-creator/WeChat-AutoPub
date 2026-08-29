@@ -90,6 +90,10 @@ class DraftCard:
         return content_hash(CONTENT_TYPE_DRAFT, self.title)
 
 
+# 贴图专用篇间间隔（2026-08-29 用户明令：贴图间隔 1 分钟之内）
+_PICPOST_GAP_RANGE = (20, 50)
+
+
 def _parse_date(text: str) -> Optional[datetime]:
     text = text or ""
     now = datetime.now()
@@ -260,7 +264,9 @@ class DraftPublisher:
             if result.ok:
                 fail_streak = 0
                 if pending.index(card) < len(pending) - 1:
-                    self._polite_wait()      # ← 3~5 分钟随机间隔（用户指定）
+                    # 下一张是贴图卡（更新于HH:MM）→ 贴图专用快间隔；文章维持3~5分钟
+                    nxt = pending[pending.index(card) + 1]
+                    self._polite_wait(fast=self._looks_like_picpost(nxt))      # ← 3~5 分钟随机间隔（用户指定）
             else:
                 fail_streak += 1
                 if fail_streak >= 3:
@@ -295,14 +301,31 @@ class DraftPublisher:
         return False
 
     def _parse_cards(self) -> list[DraftCard]:
-        """解析当前页草稿卡片（标题 + 时间）。
+        """解析草稿箱全部卡片（懒加载 + 服务端分页双陷阱防御）。
 
-        列表懒加载陷阱（2026-08-28 实战）：首解析常只拿到部分卡片
-        （如 3/13），据此过滤会误判"无待发草稿"提前收工 →
-        双解析取更大结果。
+        - 懒加载（2026-08-28）：滚到底触发渲染，双解析取大
+        - 分页（2026-08-29 总包之声实战）：草稿箱服务端分页（每页
+          ~10张），昨夜贴图在第 2 页而解析只看第 1 页 → 用户看见
+          贴图在箱里、工具却判"0 张待发"。逐页点「下一页」累积解析。
         """
-        # 滚到底再回顶：一次性触发懒加载渲染（替代 2.5 秒盲等双解析——
-        # 实测每周期解析 3 次每次 43 秒，纯解析耗时 3 分钟/篇，是效率瓶颈）
+        all_cards: list[DraftCard] = []
+        seen_titles: set[str] = set()
+        for page in range(1, 11):                   # 硬上限 10 页防失控
+            self._scroll_load()
+            cards = self._parse_cards_once()
+            fresh = [c for c in cards if c.title not in seen_titles]
+            for c in fresh:
+                seen_titles.add(c.title)
+            all_cards.extend(fresh)
+            if not cards or not self._goto_next_page():
+                break
+            time.sleep(1.2)
+        if all_cards:
+            logger.info("草稿箱全量解析：%d 张（含翻页）", len(all_cards))
+        return all_cards
+
+    def _scroll_load(self) -> None:
+        """滚到底再回顶，触发当前页懒加载渲染。"""
         tab = self._s.tab
         try:
             tab.scroll.to_bottom()
@@ -311,18 +334,25 @@ class DraftPublisher:
             time.sleep(0.6)
         except Exception:  # noqa: BLE001 — 滚动失败不影响解析
             pass
-        cards = self._parse_cards_once()
-        if cards:
-            time.sleep(1.5)
+
+    def _goto_next_page(self) -> bool:
+        """草稿箱翻到下一页（有下一页且可点才 True）。"""
+        tab = self._s.tab
+        for sel in NEXT_PAGE_SELECTORS:
             try:
-                again = self._parse_cards_once()
-                if len(again) > len(cards):
-                    logger.info("二次解析拿到更多卡片 %d→%d（懒加载）",
-                                len(cards), len(again))
-                    cards = again
-            except Exception:  # noqa: BLE001 — 二次解析失败用首次结果
-                pass
-        return cards
+                el = tab.ele(sel, timeout=2)
+                if not is_real(el):
+                    continue
+                cls = (el.attr("class") or "")
+                if "disabled" in cls:
+                    return False
+                if click_robust(el):
+                    self._s.wait_ready(timeout=10)
+                    time.sleep(1.0)
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
 
     def _parse_cards_once(self) -> list[DraftCard]:
         """单次解析草稿卡片。"""
@@ -362,6 +392,15 @@ class DraftPublisher:
 
     def _is_done(self, card: DraftCard) -> bool:
         return self._state.is_published(self._account, CONTENT_TYPE_DRAFT, card.chash)
+
+    @staticmethod
+    def _looks_like_picpost(card: DraftCard) -> bool:
+        """贴图草稿卡判别：时间文本是「更新于 HH:MM」且无任何日期词。
+        误判代价不对称——误当贴图只是间隔略快（无害），误当文章只是慢。"""
+        t = (card.time_text or "").strip()
+        if "更新于" not in t:
+            return False
+        return not any(k in t for k in ("今天", "昨天", "月", "日", "周", "-"))
 
     # —— 单篇发布 ——
 
@@ -950,12 +989,18 @@ return (() => {
                 continue
         return ""
 
-    def _polite_wait(self) -> None:
-        """3~5 分钟随机间隔（用户指定，INI 可调），支持随时停止。"""
-        lo, hi = (self._gap_range
-                  or (self._cfg.草稿.每篇间隔最小秒, self._cfg.草稿.每篇间隔最大秒))
+    def _polite_wait(self, fast: bool = False) -> None:
+        """篇间随机间隔（文章 3~5 分钟用户指定；贴图 20~50 秒），支持随时停止。"""
+        if fast:
+            lo, hi = _PICPOST_GAP_RANGE
+            tag = "贴图专用"
+        else:
+            lo, hi = (self._gap_range
+                      or (self._cfg.草稿.每篇间隔最小秒,
+                          self._cfg.草稿.每篇间隔最大秒))
+            tag = "文章"
         wait = random.uniform(lo, hi)
-        logger.info("拟人间隔 %.0f 秒（%d~%d 随机）", wait, lo, hi)
+        logger.info("拟人间隔 %.0f 秒（%s %d~%d 随机）", wait, tag, lo, hi)
         deadline = time.time() + wait
         while time.time() < deadline and not self._should_stop():
             time.sleep(2.0)

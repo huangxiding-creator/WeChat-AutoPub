@@ -36,7 +36,7 @@ def main() -> int:
         session.start_minimize_watchdog()   # 运行期间窗口始终保持最小化
         # fast=贴图批清专用：篇间 2~3.3 分钟（图片轻量内容），文章仍走 3~5 分钟
         pub = DraftPublisher(session, cfg, state, None, account_name=account,
-                             gap_range=(120, 200) if fast else None)
+                             gap_range=(20, 50) if fast else None)
         results = pub.publish_recent_drafts()
         for r in results:
             mark = "OK " if r.ok else "FAIL"

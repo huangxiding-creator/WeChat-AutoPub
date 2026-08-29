@@ -126,9 +126,12 @@ class Orchestrator:
         # 用已实战验证的草稿发布链再发布一轮（贴图即今日新草稿）
         picposts_drafts: list = []
         if any(r.ok for r in picposts):
+            # 贴图专用间隔 20~50 秒（2026-08-29 用户明令：贴图间隔
+            # 1 分钟之内；文章轮仍走 3~5 分钟防风控节奏）
             picposts_drafts = DraftPublisher(
                 session, self._cfg, self._state, self._notifier,
                 account_name=nickname, should_stop=self._should_stop,
+                gap_range=(20, 50),
             ).publish_recent_drafts()
             picposts = picposts + picposts_drafts
 
