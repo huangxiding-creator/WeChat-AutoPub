@@ -3,6 +3,7 @@
 用法：
   python run.py --mode run              # 立即运行完整流程（多账号循环）
   python run.py --mode auto             # 定时任务调用（同 run + 启动通知）
+  python run.py --mode auto --window 09:00-12:00   # 窗口内随机时刻启动（拟人化）
   python run.py --install-schedule      # 安装每日 09:00 定时任务（重启存活）
   python run.py --uninstall-schedule    # 卸载定时任务
   python run.py --recon                 # 侦察模式：dump 页面 HTML 辅助选择器调试
@@ -10,8 +11,12 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import os
+import random
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -90,17 +95,82 @@ def recon() -> int:
             pass
 
 
+def wait_window(window: str) -> None:
+    """在 HH:MM-HH:MM 窗口内随机挑一个时刻启动（拟人化，避开固定指纹）。
+
+    错过补跑场景（开机晚于窗口起点）自动收窄随机区间；已过窗口则立即运行。
+    """
+    try:
+        start_s, end_s = window.split("-", 1)
+        sh, sm = (int(x) for x in start_s.split(":"))
+        eh, em = (int(x) for x in end_s.split(":"))
+    except ValueError:
+        logger.warning("窗口参数 %r 非法（应为 HH:MM-HH:MM），跳过随机延迟直接运行", window)
+        return
+    now = datetime.now()
+    lo_dt = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    hi_dt = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+    if now >= hi_dt:
+        logger.info("已过 %s 窗口，立即运行", window)
+        return
+    lo = max(0.0, (lo_dt - now).total_seconds())
+    hi = (hi_dt - now).total_seconds()
+    delay = random.uniform(lo, hi)
+    start_at = now + timedelta(seconds=delay)
+    logger.info("定时窗口 %s：随机延时 %.0f 秒（预计 %s 启动）",
+                window, delay, start_at.strftime("%H:%M:%S"))
+    deadline = time.time() + delay
+    while time.time() < deadline:
+        time.sleep(min(30.0, max(0.0, deadline - time.time())))
+
+
+def _pid_alive(pid: int) -> bool:
+    """OpenProcess 探活（只查询不注入；Windows 上 os.kill(pid,0) 会真杀进程，禁用）。"""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        kernel32.CloseHandle(handle)
+        return True
+    except Exception:                                        # noqa: BLE001 — 探活失败宁可不跑
+        return True
+
+
+def _acquire_run_lock() -> bool:
+    """单实例锁：串行红线（绝不同时跑两套管线抢同一批浏览器）。"""
+    lock = Path("data/run.lock")
+    if lock.exists():
+        try:
+            old = int(lock.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            old = 0
+        if old and _pid_alive(old):
+            logger.error("已有运行实例（PID %d），本次退出", old)
+            return False
+        logger.info("清理残留锁（PID %s 已不存在）", old or "?")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(os.getpid()), encoding="utf-8")
+    return True
+
+
+def _release_run_lock() -> None:
+    Path("data/run.lock").unlink(missing_ok=True)
+
+
 def install_schedule() -> int:
     cfg = load_config()
     if not cfg.定时.启用:
         print("config.ini [定时] 启用=否，请改为 是 后重试")
         return 1
     # 打包后用 exe；源码模式用当前 venv 的 python + run.py
+    window = f"{cfg.定时.运行时间}-{cfg.定时.最晚运行时间}"
     if getattr(sys, "frozen", False):
-        command, args = sys.executable, "--mode auto"
+        command, args = sys.executable, f"--mode auto --window {window}"
         workdir = str(Path(sys.executable).parent)
     else:
-        command, args = sys.executable, str(Path(__file__).resolve()) + " --mode auto"
+        command = sys.executable
+        args = str(Path(__file__).resolve()) + f" --mode auto --window {window}"
         workdir = str(Path(__file__).resolve().parent)
     ok, msg = task_scheduler.install_daily_task(
         command=command, arguments=args, workdir=workdir,
@@ -119,6 +189,8 @@ def main() -> int:
     parser.add_argument("--uninstall-schedule", action="store_true", help="卸载定时任务")
     parser.add_argument("--schedule-status", action="store_true", help="查询定时任务状态")
     parser.add_argument("--recon", action="store_true", help="页面侦察模式（选择器调试）")
+    parser.add_argument("--window", default=None, metavar="HH:MM-HH:MM",
+                        help="定时随机窗口（如 09:00-12:00）：窗口内随机时刻启动")
     args = parser.parse_args()
 
     setup_logging()
@@ -136,7 +208,14 @@ def main() -> int:
     if args.recon:
         return recon()
     if args.mode:
-        return run_once(args.mode, max_publish=args.max)
+        if args.window:
+            wait_window(args.window)
+        if not _acquire_run_lock():
+            return 2
+        try:
+            return run_once(args.mode, max_publish=args.max)
+        finally:
+            _release_run_lock()
 
     parser.print_help()
     return 0

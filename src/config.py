@@ -27,7 +27,7 @@ class AccountConfig:
 
 @dataclass(frozen=True)
 class DraftConfig:
-    发布最近天数: int = 2
+    发布最近天数: int = 3
     每篇间隔最小秒: int = 180
     每篇间隔最大秒: int = 300
 
@@ -42,6 +42,7 @@ class PicPostConfig:
 class ScheduleConfig:
     启用: bool = True
     运行时间: str = "09:00"
+    最晚运行时间: str = "12:00"      # 每天 [运行时间, 最晚运行时间] 窗口内随机启动
     错过补跑: bool = True
     仅工作日: bool = False
 
@@ -139,13 +140,22 @@ def _validate(cfg: AppConfig) -> None:
             "（红线：杜绝任何收费模型）"
         )
 
-    hour, _, minute = cfg.定时.运行时间.partition(":")
-    try:
-        h, m = int(hour), int(minute)
-    except ValueError as exc:
-        raise ConfigError(f"[定时] 运行时间 {cfg.定时.运行时间!r} 非法（应为 HH:MM）") from exc
-    if not (0 <= h <= 23 and 0 <= m <= 59):
-        raise ConfigError(f"[定时] 运行时间 {cfg.定时.运行时间!r} 超出范围")
+    def _minutes(spec: str, label: str) -> int:
+        hh, _, mm = spec.partition(":")
+        try:
+            h, m = int(hh), int(mm)
+        except ValueError as exc:
+            raise ConfigError(f"[定时] {label} {spec!r} 非法（应为 HH:MM）") from exc
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ConfigError(f"[定时] {label} {spec!r} 超出范围")
+        return h * 60 + m
+
+    start = _minutes(cfg.定时.运行时间, "运行时间")
+    end = _minutes(cfg.定时.最晚运行时间, "最晚运行时间")
+    if start >= end:
+        raise ConfigError(
+            f"[定时] 最晚运行时间 {cfg.定时.最晚运行时间!r} 必须晚于 "
+            f"运行时间 {cfg.定时.运行时间!r}")
 
     if cfg.引擎.优先模式 not in ("自动", "浏览器", "接口"):
         raise ConfigError("[引擎] 优先模式 仅支持 自动/浏览器/接口")
@@ -168,7 +178,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
             开启新账号扫码窗口=_get_bool(cp, "账号", "开启新账号扫码窗口", False),
         ),
         草稿=DraftConfig(
-            发布最近天数=_get_int(cp, "草稿", "发布最近天数", 2),
+            发布最近天数=_get_int(cp, "草稿", "发布最近天数", 3),
             每篇间隔最小秒=_get_int(cp, "草稿", "每篇间隔最小秒", 180),
             每篇间隔最大秒=_get_int(cp, "草稿", "每篇间隔最大秒", 300),
         ),
@@ -179,6 +189,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
         定时=ScheduleConfig(
             启用=_get_bool(cp, "定时", "启用", True),
             运行时间=_get_str(cp, "定时", "运行时间", "09:00"),
+            最晚运行时间=_get_str(cp, "定时", "最晚运行时间", "12:00"),
             错过补跑=_get_bool(cp, "定时", "错过补跑", True),
             仅工作日=_get_bool(cp, "定时", "仅工作日", False),
         ),

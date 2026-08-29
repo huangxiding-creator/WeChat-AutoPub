@@ -20,9 +20,10 @@ def test_load_real_config():
     cfg = load_config()
     assert cfg.草稿.每篇间隔最小秒 == 180
     assert cfg.草稿.每篇间隔最大秒 == 300      # 用户红线：3~5 分钟
-    assert cfg.草稿.发布最近天数 == 2
+    assert cfg.草稿.发布最近天数 == 3
     assert cfg.贴图.翻页数 == 5
     assert cfg.定时.运行时间 == "09:00"
+    assert cfg.定时.最晚运行时间 == "12:00"
     assert cfg.定时.错过补跑 is True
 
 
