@@ -376,18 +376,28 @@ class DraftPublisher:
         return []
 
     def _filter_recent(self, cards: list[DraftCard]) -> list[DraftCard]:
+        """贴图全发 + 文章只发最近 N 天（2026-08-29 用户双指令）。
+
+        贴图卡（「更新于 HH:MM」时间-only）不受日期窗口限制；
+        文章卡走窗口过滤；陈年文章草稿（如 01月13日 的讲座材料）留箱不动。
+        """
         cutoff = datetime.now() - timedelta(days=self._cfg.草稿.发布最近天数)
         cutoff = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
-        recent, nodate = [], 0
+        recent, nodate, pics = [], 0, 0
         for c in cards:
+            if self._looks_like_picpost(c):
+                recent.append(c)    # 贴图：发布所有的（不限日期）
+                pics += 1
+                continue
             dt = _parse_date(c.time_text)
             if dt is None:
                 nodate += 1          # 日期解析失败 → 排除（实战：2020老文章无日期被误判新稿）
                 continue
             if dt >= cutoff:
                 recent.append(c)
-        logger.info("草稿过滤：%d 张中 %d 张在最近 %d 天内（%d 张日期无法解析已排除）",
-                    len(cards), len(recent), self._cfg.草稿.发布最近天数, nodate)
+        logger.info("草稿过滤：%d 张中 %d 张待发（贴图 %d 张不限日期 + 文章 %d 张在最近 %d 天内；%d 张日期无法解析已排除）",
+                    len(cards), len(recent), pics, len(recent) - pics,
+                    self._cfg.草稿.发布最近天数, nodate)
         return recent
 
     def _is_done(self, card: DraftCard) -> bool:
