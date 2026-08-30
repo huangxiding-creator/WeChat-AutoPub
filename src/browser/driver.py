@@ -24,6 +24,72 @@ _PORT_BASE = 19000
 _PORT_SPAN = 2000
 _STARTUP_TIMEOUT = 20
 
+def parse_wmic_list_output(text: str, profile_root: Path,
+                           main_only: bool = False) -> list[int]:
+    """解析 `wmic process get /format:list` 输出，返回命令行含 profile_root 的 PID。
+
+    /format:list 按 KEY=VALUE 空行分块，规避命令行内逗号破坏 CSV 解析。
+    匹配：CommandLine 含 profile_root 路径（不区分大小写、斜杠归一）。
+    main_only=True 时只取带 --remote-debugging-port 的主进程（渲染/GPU
+    等子进程虽同 user-data-dir 但无端口参数，交给主进程树杀连带处理）。
+    """
+    root_norm = str(profile_root).replace("/", "\\").lower()
+    pids: list[int] = []
+    # wmic /format:list 行尾是 \r\r\n（经典怪癖），全部归一为 \n 再分块
+    for block in (text.replace("\r\r\n", "\n")
+                      .replace("\r\n", "\n").replace("\r", "\n")
+                      .split("\n\n")):
+        cmdline = ""
+        pid = 0
+        for line in block.splitlines():
+            if line.startswith("CommandLine="):
+                cmdline = line[len("CommandLine="):]
+            elif line.startswith("ProcessId="):
+                try:
+                    pid = int(line[len("ProcessId="):].strip())
+                except ValueError:
+                    pid = 0
+        if not pid:
+            continue
+        norm = cmdline.replace("/", "\\").lower()
+        is_main = ("--remote-debugging-port=" in norm
+                   and "--type=" not in norm)   # 子进程带 --type=renderer 等
+        if root_norm in norm and not (main_only and not is_main):
+            pids.append(pid)
+    return pids
+
+
+def close_project_browsers(profile_root: Path) -> int:
+    """关闭本工具启动的所有浏览器实例（收工收口）。
+
+    用户指令（2026-08-30）：任务全部完成后关闭工具打开的所有浏览器窗口。
+    识别规则：命令行 --user-data-dir 含本项目 profile 路径——用户自己的
+    浏览器不含该路径，零误伤。只杀主进程并 /T 树杀（连带全部子进程）。
+    登录态 cookie 存于 profile 磁盘目录，进程关闭不丢，下次运行自动复活
+    （2026-08-30 多次进程重启均 cookie 免扫码实证）。wmic 不可用时失败
+    开放：浏览器保留，无害。
+    """
+    query = ("wmic process where \"name='chrome.exe' or name='msedge.exe'\" "
+             "get CommandLine,ProcessId /format:list")
+    try:
+        out = subprocess.run(query, capture_output=True, timeout=20,
+                             check=False).stdout
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("枚举浏览器进程失败（浏览器保留不关）: %s", exc)
+        return 0
+    pids = parse_wmic_list_output(out.decode("gbk", errors="replace"),
+                                  profile_root, main_only=True)
+    if not pids:
+        logger.info("收口：无本工具浏览器进程需要关闭")
+        return 0
+    for pid in pids:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       capture_output=True, check=False)
+    logger.info("收口：已关闭本工具浏览器 %d 个实例（树杀；登录态保留于磁盘）",
+                len(pids))
+    return len(pids)
+
+
 _BROWSER_CANDIDATES: tuple[Path, ...] = (
     Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
     Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),

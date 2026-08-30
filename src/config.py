@@ -70,6 +70,7 @@ class BrowserConfig:
     Profile根目录: str = "data/browser_profiles"
     浏览器路径: str = ""              # 留空自动探测 Chrome/Edge
     无头模式: bool = False            # 需扫码场景必须可见
+    运行结束关闭浏览器: bool = True   # 收工收口：只关本工具 profile 的浏览器
 
 
 @dataclass(frozen=True)
@@ -209,6 +210,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
             Profile根目录=_get_str(cp, "浏览器", "Profile根目录", "data/browser_profiles"),
             浏览器路径=_get_str(cp, "浏览器", "浏览器路径", ""),
             无头模式=_get_bool(cp, "浏览器", "无头模式", False),
+            运行结束关闭浏览器=_get_bool(cp, "浏览器", "运行结束关闭浏览器", True),
         ),
     )
     _validate(cfg)

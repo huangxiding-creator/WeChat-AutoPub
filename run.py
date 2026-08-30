@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import logging
 import os
 import random
 import sys
@@ -154,6 +155,25 @@ def _acquire_run_lock() -> bool:
     return True
 
 
+def _close_browsers_if_configured() -> None:
+    """任务全部完成后关闭本工具打开的浏览器（用户指令 2026-08-30）。
+
+    只关命令行 --user-data-dir 含本项目 profile 的实例，用户自己的
+    浏览器不受影响；登录态存磁盘，下次运行 cookie 免扫码复活。
+    """
+    try:
+        cfg = load_config()
+    except Exception:  # noqa: BLE001 — 配置读不了就不收口，无害
+        return
+    if not cfg.浏览器.运行结束关闭浏览器:
+        return
+    try:
+        from src.browser.driver import close_project_browsers
+        close_project_browsers(Path(cfg.浏览器.Profile根目录))
+    except Exception as exc:  # noqa: BLE001 — 收口失败不改变退出码
+        logging.warning("浏览器收口失败（无害，浏览器保留）: %s", exc)
+
+
 def _release_run_lock() -> None:
     Path("data/run.lock").unlink(missing_ok=True)
 
@@ -215,6 +235,7 @@ def main() -> int:
         try:
             return run_once(args.mode, max_publish=args.max)
         finally:
+            _close_browsers_if_configured()   # 先关浏览器再放锁（单飞覆盖收口）
             _release_run_lock()
 
     parser.print_help()
