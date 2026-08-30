@@ -227,6 +227,7 @@ class DraftPublisher:
             if not self._open_draft_box() or not self._ensure_picpost_tab():
                 return results           # 老UI没有贴图tab，跳过
         empty_streak = 0                    # 连续0卡片次数（页面没加载完≠没草稿）
+        published_here = 0                  # 本轮已成功发布数（0=真空轮，重试可收敛）
         fail_streak = 0                     # 连续发布失败次数（熔断用）
         while not self._should_stop():
             # 验证环节会把页面带到发表记录页 → 每轮先确保回到草稿箱
@@ -250,8 +251,12 @@ class DraftPublisher:
             parsed = self._parse_cards()
             if not parsed:
                 empty_streak += 1
-                if empty_streak >= 3:
-                    logger.warning("连续 3 次解析到 0 张草稿卡片，结束本轮（url=%s）", cur)
+                # 2026-08-30 提速：真空轮（本轮还没发布过）2 次即止；刚发布过的
+                # 轮次可能撞懒加载未渲染，保留 3 次恢复窗口（09:39 实证第 3 次捞回）
+                limit = 2 if published_here == 0 else 3
+                if empty_streak >= limit:
+                    logger.warning("连续 %d 次解析到 0 张草稿卡片，结束本轮（url=%s）",
+                                   limit, cur)
                     break
                 logger.warning("第 %d 次解析到 0 张草稿卡片，刷新页面重试（url=%s）",
                                empty_streak, cur)
@@ -286,8 +291,9 @@ class DraftPublisher:
             results.append(result)
             if result.ok:
                 fail_streak = 0
+                published_here += 1
                 if pending.index(card) < len(pending) - 1:
-                    # 下一张是贴图卡 → 贴图专用快间隔；文章维持3~5分钟
+                    # 下一张是贴图卡 → 贴图专用快间隔；文章维持1.5~2.5分钟
                     nxt = pending[pending.index(card) + 1]
                     self._polite_wait(fast=nxt.is_picpost or self._looks_like_picpost(nxt))
             else:
@@ -323,8 +329,11 @@ class DraftPublisher:
             return "appmsg" in (self._s.tab.url or "")
         return False
 
-    def _parse_cards(self) -> list[DraftCard]:
+    def _parse_cards(self, stop_titles: set[str] | None = None) -> list[DraftCard]:
         """解析草稿箱全部卡片（懒加载 + 服务端分页双陷阱防御）。
+
+        stop_titles：命中任一标题即停止翻页（金标准复核用——标题
+        仍在第 1 页时无需扫全量，省 5~10 页 × ~2s）。
 
         - 懒加载（2026-08-28）：滚到底触发渲染，双解析取大
         - 分页（2026-08-29 总包之声实战）：草稿箱服务端分页（每页
@@ -340,6 +349,9 @@ class DraftPublisher:
             for c in fresh:
                 seen_titles.add(c.title)
             all_cards.extend(fresh)
+            if stop_titles and not seen_titles.isdisjoint(stop_titles):
+                logger.info("解析早停：目标标题已在第 %d 页出现", page)
+                break
             if not cards or not self._goto_next_page():
                 break
             time.sleep(1.2)
@@ -554,7 +566,10 @@ class DraftPublisher:
         logger.info("编辑器 tab 已打开（群发对话框应已预开）")
         try:
             # 3. 账号选择弹窗（风控路径可能出现，60s 慢加载）
-            if self._dismiss_account_picker(editor, timeout=60):
+            # 2026-08-30 提速：弹窗慢加载实测 5~25s 出现；缺席时把 60s
+            # 窗口轮询完是纯浪费（每篇 ~35s）。25s 仍覆盖慢加载上界；
+            # 若极端延迟出现弹窗挡确认链 → 按钮找不到 → 干净失败，下次重试。
+            if self._dismiss_account_picker(editor, timeout=25):
                 human_pause()
             if self._session_lost(editor):
                 return False, "会话被平台重置，需重新扫码"
@@ -573,7 +588,7 @@ class DraftPublisher:
                     return False, "点底栏「发表」后弹窗未出现"
             clicks = 1
             # 每点一屏后等弹窗状态稳定再点下一屏；完成判据=「安静期」：
-            # 弹窗关闭后连续 10 秒无新弹窗才算提交完成（换屏空窗期
+            # 弹窗关闭后连续 8 秒无新弹窗才算提交完成（换屏空窗期
             # 2~5 秒，只看瞬时关闭会漏掉第二屏「继续发表」）。
             fp = self._dialog_fingerprint(editor)
             for _ in range(6):          # 实测 2 屏（发表+继续发表），留余量
@@ -590,7 +605,7 @@ class DraftPublisher:
                         break
                 clicks += 1
                 fp = self._dialog_fingerprint(editor)
-            logger.info("确认链完成：共点 %d 次（安静期判据：关闭10秒无新弹窗）", clicks)
+            logger.info("确认链完成：共点 %d 次（安静期判据：关闭8秒无新弹窗）", clicks)
             human_pause()
             if self._session_lost(editor):
                 return False, "确认发表后会话被重置，需人工核对发表记录"
@@ -626,7 +641,8 @@ class DraftPublisher:
                 else:
                     tab.refresh()
                 self._s.wait_ready(timeout=15)
-                titles = [c.title for c in self._parse_cards()]
+                titles = [c.title for c in
+                          self._parse_cards(stop_titles={card.title})]
                 if card.title not in titles:
                     logger.info("✅ 金标准通过：《%s…》已从草稿箱消失", card.title[:16])
                     return True
@@ -672,7 +688,7 @@ class DraftPublisher:
         logger.warning("弹窗主按钮 %s 在 %.0f 秒内未出现", texts, timeout)
         return None
 
-    def _wait_settle(self, editor: Any, fp: str, quiet_secs: float = 10.0,
+    def _wait_settle(self, editor: Any, fp: str, quiet_secs: float = 8.0,
                      max_wait: float = 30.0) -> str:
         """点击后等待弹窗状态稳定。
 

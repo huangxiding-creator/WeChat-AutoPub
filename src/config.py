@@ -28,8 +28,8 @@ class AccountConfig:
 @dataclass(frozen=True)
 class DraftConfig:
     发布最近天数: int = 3
-    每篇间隔最小秒: int = 180
-    每篇间隔最大秒: int = 300
+    每篇间隔最小秒: int = 90
+    每篇间隔最大秒: int = 150
 
 
 @dataclass(frozen=True)
@@ -179,8 +179,8 @@ def load_config(path: Path | str | None = None) -> AppConfig:
         ),
         草稿=DraftConfig(
             发布最近天数=_get_int(cp, "草稿", "发布最近天数", 3),
-            每篇间隔最小秒=_get_int(cp, "草稿", "每篇间隔最小秒", 180),
-            每篇间隔最大秒=_get_int(cp, "草稿", "每篇间隔最大秒", 300),
+            每篇间隔最小秒=_get_int(cp, "草稿", "每篇间隔最小秒", 90),
+            每篇间隔最大秒=_get_int(cp, "草稿", "每篇间隔最大秒", 150),
         ),
         贴图=PicPostConfig(
             翻页数=_get_int(cp, "贴图", "翻页数", 5),
