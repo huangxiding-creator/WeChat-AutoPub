@@ -30,6 +30,9 @@ class DraftConfig:
     发布最近天数: int = 3
     每篇间隔最小秒: int = 90
     每篇间隔最大秒: int = 150
+    选择弹窗等待秒: int = 25     # 自复盘可调（界 12~40，实测弹窗 5~25s 慢加载）
+    安静期秒: int = 8            # 自复盘可调（界 5~15，换屏空窗实测 2~5s）
+    空轮重试上限: int = 2        # 自复盘可调（界 1~3，真空轮解析重试次数）
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,13 @@ class NotifyConfig:
 
 
 @dataclass(frozen=True)
+class RetroConfig:
+    开关: bool = True            # 每日收官后自动自复盘
+    观察天数: int = 3            # 自调参参考的历史天数
+    报告目录: str = "data/retro" # 复盘报告与趋势数据落盘位置
+
+
+@dataclass(frozen=True)
 class BrowserConfig:
     Profile根目录: str = "data/browser_profiles"
     浏览器路径: str = ""              # 留空自动探测 Chrome/Edge
@@ -83,6 +93,7 @@ class AppConfig:
     大模型: LLMConfig = field(default_factory=LLMConfig)
     通知: NotifyConfig = field(default_factory=NotifyConfig)
     浏览器: BrowserConfig = field(default_factory=BrowserConfig)
+    复盘: RetroConfig = field(default_factory=RetroConfig)
 
     @property
     def profile_root(self) -> Path:
@@ -119,12 +130,22 @@ def _get_bool(cp: configparser.ConfigParser, section: str, key: str, default: bo
     raise ConfigError(f"[{section}] {key} = {raw!r} 无法识别（应为 是/否）")
 
 
+def _bounds(value: int, lo: int, hi: int, label: str) -> None:
+    """自复盘可调参数的硬边界（护栏：任何自动调整都不得越界）。"""
+    if not (lo <= value <= hi):
+        raise ConfigError(f"{label} 越界：{value}（允许 {lo}~{hi}）")
+
+
 def _validate(cfg: AppConfig) -> None:
     d = cfg.草稿
     if not (0 <= d.每篇间隔最小秒 <= d.每篇间隔最大秒):
         raise ConfigError(
             f"[草稿] 间隔非法：最小 {d.每篇间隔最小秒}s > 最大 {d.每篇间隔最大秒}s"
         )
+    _bounds(d.选择弹窗等待秒, 12, 40, "[草稿] 选择弹窗等待秒")
+    _bounds(d.安静期秒, 5, 15, "[草稿] 安静期秒")
+    _bounds(d.空轮重试上限, 1, 3, "[草稿] 空轮重试上限")
+    _bounds(cfg.复盘.观察天数, 1, 14, "[复盘] 观察天数")
     if d.发布最近天数 < 1:
         raise ConfigError("[草稿] 发布最近天数 至少为 1")
     if cfg.贴图.翻页数 < 1:
@@ -182,6 +203,9 @@ def load_config(path: Path | str | None = None) -> AppConfig:
             发布最近天数=_get_int(cp, "草稿", "发布最近天数", 3),
             每篇间隔最小秒=_get_int(cp, "草稿", "每篇间隔最小秒", 90),
             每篇间隔最大秒=_get_int(cp, "草稿", "每篇间隔最大秒", 150),
+            选择弹窗等待秒=_get_int(cp, "草稿", "选择弹窗等待秒", 25),
+            安静期秒=_get_int(cp, "草稿", "安静期秒", 8),
+            空轮重试上限=_get_int(cp, "草稿", "空轮重试上限", 2),
         ),
         贴图=PicPostConfig(
             翻页数=_get_int(cp, "贴图", "翻页数", 5),
@@ -211,6 +235,11 @@ def load_config(path: Path | str | None = None) -> AppConfig:
             浏览器路径=_get_str(cp, "浏览器", "浏览器路径", ""),
             无头模式=_get_bool(cp, "浏览器", "无头模式", False),
             运行结束关闭浏览器=_get_bool(cp, "浏览器", "运行结束关闭浏览器", True),
+        ),
+        复盘=RetroConfig(
+            开关=_get_bool(cp, "复盘", "开关", True),
+            观察天数=_get_int(cp, "复盘", "观察天数", 3),
+            报告目录=_get_str(cp, "复盘", "报告目录", "data/retro"),
         ),
     )
     _validate(cfg)

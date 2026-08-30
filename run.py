@@ -155,6 +155,23 @@ def _acquire_run_lock() -> bool:
     return True
 
 
+def _run_retro_safe() -> None:
+    """收官自复盘（安全包装：任何异常不影响退出码与发布结果）。"""
+    try:
+        from src.retro import run_retro
+        summary = run_retro()
+        logging.info("[收官] 自复盘：%s", summary)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("自复盘异常（不影响发布结果）: %s", exc)
+
+
+def _retro_only() -> int:
+    """--retro：只跑复盘，不碰浏览器不发布。"""
+    from src.retro import run_retro
+    print(run_retro())
+    return 0
+
+
 def _close_browsers_if_configured() -> None:
     """任务全部完成后关闭本工具打开的浏览器（用户指令 2026-08-30）。
 
@@ -209,6 +226,8 @@ def main() -> int:
     parser.add_argument("--uninstall-schedule", action="store_true", help="卸载定时任务")
     parser.add_argument("--schedule-status", action="store_true", help="查询定时任务状态")
     parser.add_argument("--recon", action="store_true", help="页面侦察模式（选择器调试）")
+    parser.add_argument("--retro", action="store_true",
+                        help="仅运行自复盘（观测→诊断→有界调参→报告），不发布")
     parser.add_argument("--window", default=None, metavar="HH:MM-HH:MM",
                         help="定时随机窗口（如 09:00-12:00）：窗口内随机时刻启动")
     args = parser.parse_args()
@@ -227,6 +246,8 @@ def main() -> int:
         return 0 if ok else 1
     if args.recon:
         return recon()
+    if args.retro:
+        return _retro_only()
     if args.mode:
         if args.window:
             wait_window(args.window)
@@ -236,6 +257,7 @@ def main() -> int:
             return run_once(args.mode, max_publish=args.max)
         finally:
             _close_browsers_if_configured()   # 先关浏览器再放锁（单飞覆盖收口）
+            _run_retro_safe()                 # 收官自复盘：观测→诊断→有界调参→报告
             _release_run_lock()
 
     parser.print_help()

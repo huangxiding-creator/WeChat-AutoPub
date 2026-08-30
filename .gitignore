@@ -18,3 +18,5 @@ dist/
 
 # 私人开发笔记（不入库）
 开发初步想法/
+config.ini.bak
+data/retro/

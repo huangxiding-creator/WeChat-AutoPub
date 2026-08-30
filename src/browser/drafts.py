@@ -253,7 +253,8 @@ class DraftPublisher:
                 empty_streak += 1
                 # 2026-08-30 提速：真空轮（本轮还没发布过）2 次即止；刚发布过的
                 # 轮次可能撞懒加载未渲染，保留 3 次恢复窗口（09:39 实证第 3 次捞回）
-                limit = 2 if published_here == 0 else 3
+                limit = (self._cfg.草稿.空轮重试上限
+                         if published_here == 0 else 3)
                 if empty_streak >= limit:
                     logger.warning("连续 %d 次解析到 0 张草稿卡片，结束本轮（url=%s）",
                                    limit, cur)
@@ -569,7 +570,8 @@ class DraftPublisher:
             # 2026-08-30 提速：弹窗慢加载实测 5~25s 出现；缺席时把 60s
             # 窗口轮询完是纯浪费（每篇 ~35s）。25s 仍覆盖慢加载上界；
             # 若极端延迟出现弹窗挡确认链 → 按钮找不到 → 干净失败，下次重试。
-            if self._dismiss_account_picker(editor, timeout=25):
+            if self._dismiss_account_picker(editor,
+                                            timeout=self._cfg.草稿.选择弹窗等待秒):
                 human_pause()
             if self._session_lost(editor):
                 return False, "会话被平台重置，需重新扫码"
@@ -598,7 +600,7 @@ class DraftPublisher:
                 hit = self._click_dialog_button(editor, ("发表", "继续发表"), 10)
                 if not hit:
                     # 无按钮：可能正处换屏空窗，再等一轮安静期
-                    if self._wait_settle(editor, fp, quiet_secs=8,
+                    if self._wait_settle(editor, fp,
                                          max_wait=15) == "done":
                         break
                     if not self._click_dialog_button(editor, ("发表", "继续发表"), 8):
@@ -688,7 +690,7 @@ class DraftPublisher:
         logger.warning("弹窗主按钮 %s 在 %.0f 秒内未出现", texts, timeout)
         return None
 
-    def _wait_settle(self, editor: Any, fp: str, quiet_secs: float = 8.0,
+    def _wait_settle(self, editor: Any, fp: str, quiet_secs: float | None = None,
                      max_wait: float = 30.0) -> str:
         """点击后等待弹窗状态稳定。
 
@@ -697,6 +699,8 @@ class DraftPublisher:
         需重试点击当前屏）。
         """
         start = time.time()
+        if quiet_secs is None:
+            quiet_secs = float(self._cfg.草稿.安静期秒)
         closed_since = None
         while time.time() - start < max_wait:
             time.sleep(2.0)
