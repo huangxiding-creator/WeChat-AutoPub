@@ -18,8 +18,8 @@ from src.core.state import StateDB, content_hash                    # noqa: E402
 
 def test_load_real_config():
     cfg = load_config()
-    assert cfg.草稿.每篇间隔最小秒 == 180
-    assert cfg.草稿.每篇间隔最大秒 == 300      # 用户红线：3~5 分钟
+    assert cfg.草稿.每篇间隔最小秒 == 120
+    assert cfg.草稿.每篇间隔最大秒 == 180      # 2026-08-30 用户提速：2~3 分钟
     assert cfg.草稿.发布最近天数 == 3
     assert cfg.贴图.翻页数 == 5
     assert cfg.定时.运行时间 == "09:00"
