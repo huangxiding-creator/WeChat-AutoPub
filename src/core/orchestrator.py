@@ -133,13 +133,16 @@ class Orchestrator:
                 account_name=nickname, should_stop=self._should_stop,
                 gap_range=(20, 50),
             ).publish_recent_drafts()
-            picposts = picposts + picposts_drafts
 
         # 永不登出：每账号独立浏览器实例，切换账号=切换浏览器，
         # 登出只会销毁登录态、换来明天再扫码（用户核心诉求=少扫码）
         logger.info("[%s] %s 草稿+贴图全部完成，保留登录态（不登出）",
                     profile, nickname)
-        return AccountReport(account=account, results=tuple(drafts + picposts))
+        # 触发结果只进 triggers（触发生成≠发布），成功数口径对齐
+        # DB 台账与金标准（2026-08-31 复盘：混计致每张贴图双计）
+        return AccountReport(account=account,
+                             results=tuple(drafts + picposts_drafts),
+                             triggers=tuple(picposts))
 
     def run_for_profile(self, profile: str, target_nickname: str = "",
                         index: int = 99) -> Optional[AccountReport]:
@@ -226,9 +229,11 @@ class Orchestrator:
     def _push_account_report(self, report: AccountReport) -> None:
         if not self._notifier:
             return
+        trig = (f"\n🧩 触发生成 {report.trigger_count}（落箱后已由贴图轮发布）"
+                if report.trigger_count else "")
         lines = [
             f"📋 **账号战报 · {report.account.nickname}**",
-            f"✅ 成功 {report.ok_count} · ❌ 失败 {report.fail_count}",
+            f"✅ 成功 {report.ok_count} · ❌ 失败 {report.fail_count}{trig}",
         ]
         for r in report.results:
             mark = "✅" if r.ok else "❌"

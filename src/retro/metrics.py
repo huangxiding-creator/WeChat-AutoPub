@@ -69,10 +69,6 @@ def build_metrics(events: list[Event], day: date, db_path: Path) -> DayMetrics:
             m.picker_seen += 1
         elif "「发表」按钮未找到" in msg:
             m.button_missing += 1
-        elif "选择器可能漂移" in msg:
-            m.selector_drift += 1
-        elif "次解析到 0 张草稿卡片，结束本轮" in msg:
-            m.empty_breaks += 1
         elif "会话被平台重置" in msg or "需重新扫码" in msg:
             m.session_lost += 1
         elif "草稿+贴图全部完成" in msg:
@@ -82,6 +78,12 @@ def build_metrics(events: list[Event], day: date, db_path: Path) -> DayMetrics:
             if hit:
                 (m.gap_pic if hit.group(2) == "贴图专用"
                  else m.gap_article).append(int(hit.group(1)))
+        # 空轮终结与漂移可同现一行（文章tab空轮终结告警自带漂移
+        # 提示），故独立计数不走 elif 链
+        if "次解析到 0 张草稿卡片，结束本轮" in msg:
+            m.empty_breaks += 1
+        if "选择器可能漂移" in msg:
+            m.selector_drift += 1
     _attach_db(m, db_path)
     return m
 

@@ -33,6 +33,7 @@ class DraftConfig:
     选择弹窗等待秒: int = 25     # 自复盘可调（界 12~40，实测弹窗 5~25s 慢加载）
     安静期秒: int = 8            # 自复盘可调（界 5~15，换屏空窗实测 2~5s）
     空轮重试上限: int = 2        # 自复盘可调（界 1~3，真空轮解析重试次数）
+    贴图渲染宽限秒: int = 8      # 贴图tab XHR 异步渲染：切tab后轮询等卡片上限（界 3~15）
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,7 @@ def _validate(cfg: AppConfig) -> None:
     _bounds(d.选择弹窗等待秒, 12, 40, "[草稿] 选择弹窗等待秒")
     _bounds(d.安静期秒, 5, 15, "[草稿] 安静期秒")
     _bounds(d.空轮重试上限, 1, 3, "[草稿] 空轮重试上限")
+    _bounds(d.贴图渲染宽限秒, 3, 15, "[草稿] 贴图渲染宽限秒")
     _bounds(cfg.复盘.观察天数, 1, 14, "[复盘] 观察天数")
     if d.发布最近天数 < 1:
         raise ConfigError("[草稿] 发布最近天数 至少为 1")
@@ -206,6 +208,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
             选择弹窗等待秒=_get_int(cp, "草稿", "选择弹窗等待秒", 25),
             安静期秒=_get_int(cp, "草稿", "安静期秒", 8),
             空轮重试上限=_get_int(cp, "草稿", "空轮重试上限", 2),
+            贴图渲染宽限秒=_get_int(cp, "草稿", "贴图渲染宽限秒", 8),
         ),
         贴图=PicPostConfig(
             翻页数=_get_int(cp, "贴图", "翻页数", 5),

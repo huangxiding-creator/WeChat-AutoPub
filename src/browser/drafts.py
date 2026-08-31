@@ -246,9 +246,10 @@ class DraftPublisher:
                 ))
                 break
             if picpost_tab and not self._ensure_picpost_tab():
-                logger.warning("贴图tab失活且无法重新切换，结束贴图轮")
+                logger.warning("贴图tab失活且无法重新切换，结束贴图轮（贴图箱可能已空）")
                 break
-            parsed = self._parse_cards()
+            parsed = (self._parse_sticker_tab() if picpost_tab
+                      else self._parse_cards())
             if not parsed:
                 empty_streak += 1
                 # 2026-08-30 提速：真空轮（本轮还没发布过）2 次即止；刚发布过的
@@ -256,8 +257,16 @@ class DraftPublisher:
                 limit = (self._cfg.草稿.空轮重试上限
                          if published_here == 0 else 3)
                 if empty_streak >= limit:
-                    logger.warning("连续 %d 次解析到 0 张草稿卡片，结束本轮（url=%s）",
-                                   limit, cur)
+                    if picpost_tab:
+                        # 贴图箱发空=贴图轮正常收官（08-31 实证：箱空时
+                        # 连「贴图」tab 按钮都会消失，非异常）
+                        logger.info("贴图箱已空（连续 %d 次解析到 0 张草稿卡片），"
+                                    "贴图轮完成", limit)
+                    else:
+                        logger.warning(
+                            "连续 %d 次解析到 0 张草稿卡片，结束本轮——若箱内"
+                            "仍有草稿则选择器可能漂移，建议 run.py --recon 存档"
+                            "排查（url=%s）", limit, cur)
                     break
                 logger.warning("第 %d 次解析到 0 张草稿卡片，刷新页面重试（url=%s）",
                                empty_streak, cur)
@@ -408,8 +417,23 @@ class DraftPublisher:
             if cards:
                 logger.info("解析到 %d 张草稿卡片（选择器 %s）", len(cards), sel)
                 return cards
-        logger.warning("未解析到草稿卡片——选择器可能漂移，建议 run.py --recon 存档排查")
+        # 0 卡片≠漂移：贴图箱发空 / SPA 慢渲染都会走到这里。真漂移信号
+        # 由 _publish_loop 的轮次结束告警承担（2026-08-31 复盘：旧告警
+        # 日均 68 条全为假阳性，把真风险淹没）
+        logger.info("本页未解析到草稿卡片（未加载完或该 tab 箱已空）")
         return []
+
+    def _parse_sticker_tab(self) -> list[DraftCard]:
+        """贴图tab解析（带渲染宽限）：贴图列表为 XHR 异步渲染，切 tab 后
+        立即解析常拿到 0 张（08-31 实测：随即走刷新重入链，每次多花
+        1~2 分钟且刷出假漂移告警）。短轮询等渲染，宽限内拿到即返回。
+        """
+        deadline = time.time() + float(self._cfg.草稿.贴图渲染宽限秒)
+        while True:
+            cards = self._parse_cards()
+            if cards or time.time() >= deadline:
+                return cards
+            time.sleep(2.0)
 
     def _filter_recent(self, cards: list[DraftCard]) -> list[DraftCard]:
         """贴图全发 + 文章只发最近 N 天（2026-08-29 用户双指令）。

@@ -15,6 +15,24 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT_SECONDS = 10
 
+_MARKDOWN_SAFE_BYTES = 3800    # 企微 markdown 上限 4096 字节（超限报 40058），
+                               # 留余量给截断提示行
+_TRUNCATE_NOTE = "\n\n…（战报超长已截断，完整清单见 data/logs/autopub.log）"
+
+
+def truncate_markdown(markdown: str,
+                      max_bytes: int = _MARKDOWN_SAFE_BYTES) -> str:
+    """超长 markdown 按字节安全截断（UTF-8 字符边界），尾部加提示行。
+
+    2026-08-30 实战：42 篇战报 markdown 超 4096 字节被企微拒收
+    （errcode 40058），整条日报丢失。
+    """
+    if len(markdown.encode("utf-8")) <= max_bytes:
+        return markdown
+    room = max_bytes - len(_TRUNCATE_NOTE.encode("utf-8"))
+    cut = markdown.encode("utf-8")[:room]
+    return cut.decode("utf-8", errors="ignore") + _TRUNCATE_NOTE
+
 
 class WecomNotifier:
     """企微群机器人通知器。"""
@@ -54,8 +72,9 @@ class WecomNotifier:
         })
 
     def send_markdown(self, markdown: str) -> bool:
-        """发送 markdown 消息（日报/战报）。"""
-        return self._post({"msgtype": "markdown", "markdown": {"content": markdown}})
+        """发送 markdown 消息（日报/战报，超长自动截断防 40058）。"""
+        content = truncate_markdown(markdown)
+        return self._post({"msgtype": "markdown", "markdown": {"content": content}})
 
     def send_action_needed(self, action: str, detail: str = "") -> bool:
         """需要用户动手的提醒（扫码等），@所有人确保看到。"""
