@@ -213,7 +213,7 @@ def install_schedule() -> int:
         command=command, arguments=args, workdir=workdir,
         run_time=cfg.定时.运行时间, catch_up=cfg.定时.错过补跑,
     )
-    print(("✅ " if ok else "❌ ") + msg)
+    print(("[OK] " if ok else "[FAIL] ") + msg)
     return 0 if ok else 1
 
 
@@ -238,11 +238,11 @@ def main() -> int:
         return install_schedule()
     if args.uninstall_schedule:
         ok, msg = task_scheduler.uninstall_daily_task()
-        print(("✅ " if ok else "❌ ") + msg)
+        print(("[OK] " if ok else "[FAIL] ") + msg)
         return 0 if ok else 1
     if args.schedule_status:
         ok, msg = task_scheduler.task_status()
-        print(("✅ " if ok else "❌ ") + msg)
+        print(("[OK] " if ok else "[FAIL] ") + msg)
         return 0 if ok else 1
     if args.recon:
         return recon()
