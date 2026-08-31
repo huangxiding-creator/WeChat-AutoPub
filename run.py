@@ -17,7 +17,7 @@ import os
 import random
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -195,6 +195,65 @@ def _release_run_lock() -> None:
     Path("data/run.lock").unlink(missing_ok=True)
 
 
+_DONE_DIR = Path(__file__).resolve().parent / "data" / "daily_done"
+
+
+def _today_done(log_path: Path | None = None,
+                marker_dir: Path | None = None) -> bool:
+    """当日完成证据（幂等防重跑的判据，三触发共用的安全阀）。
+
+    任一为真即视为今日已完成：① data/daily_done/<今日>.ok 标记文件
+    （run_once 成功后写入）；② 当日日志出现「运行结束」（覆盖旧代码
+    进程与标记写入前的崩溃残留）。当日无证据 → 允许备份触发重跑
+    （content_hash 去重 + 金标准验证天然幂等，重跑无副作用）。
+    """
+    marker = (marker_dir or _DONE_DIR) / f"{date.today().isoformat()}.ok"
+    if marker.exists():
+        return True
+    log = log_path or (Path(__file__).resolve().parent
+                       / "data" / "logs" / "autopub.log")
+    if not log.exists():
+        return False
+    needle = f"{date.today().isoformat()} "
+    try:
+        return any(needle in ln and "运行结束" in ln
+                   for ln in log.read_text(
+                       encoding="utf-8", errors="replace").splitlines()[-400:])
+    except OSError:
+        return False
+
+
+def _mark_today_done() -> None:
+    """当日成功标记（备份/登录触发后续触发据此秒退）。"""
+    try:
+        _DONE_DIR.mkdir(parents=True, exist_ok=True)
+        (_DONE_DIR / f"{date.today().isoformat()}.ok").write_text(
+            f"pid={os.getpid()} {datetime.now():%H:%M:%S}", encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 — 标记失败不影响运行
+        logger.warning("写当日完成标记失败: %s", exc)
+
+
+def _ensure_schedule_health() -> None:
+    """三任务定时自愈：被安全软件清除后自动补装（生产级兜底）。
+
+    每次运行开始与收官各查一次——只要当天有任一触发成功过，被清的
+    任务就会被自动找回；三任务异名冗余，全灭概率极低。
+    """
+    try:
+        cfg = load_config()
+        if not cfg.定时.启用:
+            return
+        window = f"{cfg.定时.运行时间}-{cfg.定时.最晚运行时间}"
+        task_scheduler.ensure_installed(
+            command=sys.executable,
+            arguments=str(Path(__file__).resolve())
+                      + f" --mode auto --window {window}",
+            workdir=str(Path(__file__).resolve().parent),
+            catch_up=cfg.定时.错过补跑)
+    except Exception as exc:  # noqa: BLE001 — 自愈失败不阻断发布
+        logger.warning("定时任务自愈检查失败（不影响本次运行）: %s", exc)
+
+
 def install_schedule() -> int:
     cfg = load_config()
     if not cfg.定时.启用:
@@ -249,15 +308,24 @@ def main() -> int:
     if args.retro:
         return _retro_only()
     if args.mode:
-        if args.window:
-            wait_window(args.window)
-        if not _acquire_run_lock():
+        _ensure_schedule_health()             # 开跑先自愈：被清的定时任务补回来
+        if _today_done():
+            logger.info("今日运行已完成（幂等防重），本触发安全退出")
+            print("今日运行已完成，无需重复")
+            return 0
+        if not _acquire_run_lock():           # 锁先于窗口睡眠：重复触发数秒即退
             return 2
         try:
-            return run_once(args.mode, max_publish=args.max)
+            if args.window:
+                wait_window(args.window)      # 只有持锁实例才睡窗口
+            rc = run_once(args.mode, max_publish=args.max)
+            if rc == 0:
+                _mark_today_done()            # 成功标记：后续触发秒退
+            return rc
         finally:
             _close_browsers_if_configured()   # 先关浏览器再放锁（单飞覆盖收口）
             _run_retro_safe()                 # 收官自复盘：观测→诊断→有界调参→报告
+            _ensure_schedule_health()         # 收官再自愈一次（明日保险）
             _release_run_lock()
 
     parser.print_help()
