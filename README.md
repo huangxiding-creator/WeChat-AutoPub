@@ -1,8 +1,8 @@
 # WeChat-AutoPub —— 微信公众号草稿·贴图全自动发布系统
 
-> 每天上午自动运行：三账号串行登录 → 草稿箱文章/贴图发布 → 发表记录贴图触发 → 金标准验证 → 收工关闭浏览器 → **自复盘迭代改进**。全程拟人节奏、零删除零编辑、多级熔断护栏。
+> 每天上午自动运行：三层冗余定时触发 → 三账号串行登录 → 草稿箱文章/贴图发布 → 发表记录贴图触发 → 金标准验证 → 收工关闭浏览器 → **自复盘迭代改进**。全程拟人节奏、零删除零编辑、多级熔断护栏、单点故障自愈。
 
-[![tests](https://img.shields.io/badge/tests-42%20passed-brightgreen)]()
+[![tests](https://img.shields.io/badge/tests-46%20passed-brightgreen)]()
 [![python](https://img.shields.io/badge/python-3.11%2B-blue)]()
 [![engine](https://img.shields.io/badge/引擎-DrissionPage%204.x-orange)]()
 
@@ -14,9 +14,11 @@
 - [系统架构](#系统架构)
 - [快速开始](#快速开始)
 - [配置参考](#配置参考)
+- [定时可靠性（生产级三层冗余）](#定时可靠性生产级三层冗余)
 - [每日自动流程](#每日自动流程)
 - [自复盘迭代机制](#自复盘迭代机制)
 - [安全设计（红线）](#安全设计红线)
+- [实战验证](#实战验证)
 - [测试](#测试)
 - [故障排查](#故障排查)
 - [近期演进](#近期演进)
@@ -61,7 +63,11 @@ browser/session.py ── driver.py（DETACHED 独立 Chrome，
 收官链（run.py finally，无论成败都执行）：
   ① close_project_browsers()  收工关浏览器（精准识别三账号实例）
   ② run_retro()               自复盘：观测→诊断→有界调参→报告
-  ③ 释放单实例锁
+  ③ ensure_installed()        定时任务自愈（被清即补装，明日保险）
+  ④ 释放单实例锁
+
+幂等防重（三触发同命令）：单实例锁先于窗口睡眠获取；当日完成证据
+（daily_done/<日期>.ok 或当日「运行结束」日志行）让重复触发数秒退出。
 ```
 
 ### 目录结构
@@ -90,7 +96,7 @@ src/
     rules.py              诊断规则 → 发现 + 有界调参决策
     tuner.py              安全写回 config.ini（备份+回滚+边界复核）
     report.py             data/retro/YYYY-MM-DD.md + trend.csv
-tests/                    42 项单元测试（pytest）
+tests/                    46 项单元测试（pytest）
 ```
 
 ## 快速开始
@@ -239,12 +245,13 @@ date,accounts_done,db_published,db_failed,gold_pass,flow_mean_s,gap_article_mean
 ## 测试
 
 ```bash
-python -m pytest tests/ -q     # 42 项全绿
+python -m pytest tests/ -q     # 46 项全绿
 ```
 
 覆盖：配置加载与边界校验、间隔/窗口参数、日志解析、指标聚合、调参规则
 （收窄/回撤/地板/人工覆盖四象限）、调参写回（生效/同值/缺键/回滚）、
-浏览器收口解析（精准匹配/斜杠归一/默认开关）。
+浏览器收口解析（精准匹配/斜杠归一/默认开关）、定时冗余
+（三任务定义/XML 多触发器组合/当日完成证据三态/完成标记写入）。
 
 ## 故障排查
 
@@ -252,7 +259,7 @@ python -m pytest tests/ -q     # 42 项全绿
 |---|---|
 | 日志大量「选择器可能漂移」 | `python run.py --recon` 存档页面结构，维护会话更新选择器 |
 | 提示需重新扫码 | cookie 失效：手动打开浏览器跑一次可见模式扫码 |
-| 定时任务没跑 | `python run.py --schedule-status`；被安全软件清理则重装 `--install-schedule` |
+| 定时任务没跑 | `python run.py --schedule-status` 核三任务；工具每次运行会自动补装被清任务（自愈），手动重装用 `--install-schedule`；建议在安全软件把任务/脚本加入信任名单 |
 | 双开保护误触发 | 检查 `data/run.lock` 内 PID 是否真存活（工具会自动清理死锁） |
 | 推送 GitHub 代理断连 | `git -c http.proxy= -c https.proxy= push` 直连兜底 |
 | 企微通知被拒 errcode 40058 | 单日结果超多时 markdown 超 4096 字上限（已知，后续版本加截断） |
