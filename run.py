@@ -172,6 +172,46 @@ def _retro_only() -> int:
     return 0
 
 
+def _keepalive() -> int:
+    """--keepalive：登录保活巡检（每日 07:00 定时，续命+预警，不发布）。
+
+    逐档案串行访问后台首页刷新会话；失效的尝试一键「登录」恢复；
+    救不回的汇总企微预警（下次运行启动预检会要求扫码）。与主运行
+    共用 data/run.lock——先到先得，撞车即让路（串行红线）。
+    """
+    from src.browser.login import preflight_logins
+    from src.core.state import StateDB
+
+    cfg = load_config()
+    if not _acquire_run_lock():
+        logger.info("保活巡检：主运行进行中，本次让路退出")
+        return 0
+    try:
+        state = StateDB()
+        profiles = [p for p, _n in state.list_profiles()]
+        notifier = _build_notifier(cfg)
+        results = preflight_logins(cfg, state, profiles, notifier,
+                                   timeout_minutes=0, wait_scan=False)
+        dead = [p for p, n in results.items() if not n]
+        logger.info("保活巡检：%d/%d 登录有效，失效=%s", len(profiles) - len(dead),
+                    len(profiles), "、".join(dead) or "无")
+        if dead and notifier:
+            notifier.send_action_needed(
+                "登录态失效预警",
+                "保活巡检：" + "、".join(dead)
+                + " 登录态失效（一键恢复未成功）。下次运行启动预检会弹出"
+                  "二维码，请在 30 分钟内扫码；或提前用 scan_login.py 补登。")
+        if cfg.浏览器.运行结束关闭浏览器:      # 持锁独占，全量收口安全
+            try:
+                from src.browser.driver import close_project_browsers
+                close_project_browsers(Path(cfg.浏览器.Profile根目录))
+            except Exception as exc:          # noqa: BLE001
+                logger.warning("保活收口失败（无害）: %s", exc)
+    finally:
+        _release_run_lock()
+    return 0
+
+
 def _close_browsers_if_configured() -> None:
     """任务全部完成后关闭本工具打开的浏览器（用户指令 2026-08-30）。
 
@@ -287,6 +327,8 @@ def main() -> int:
     parser.add_argument("--recon", action="store_true", help="页面侦察模式（选择器调试）")
     parser.add_argument("--retro", action="store_true",
                         help="仅运行自复盘（观测→诊断→有界调参→报告），不发布")
+    parser.add_argument("--keepalive", action="store_true",
+                        help="登录保活巡检：逐号刷新会话+失效预警（不发布，定时 07:00）")
     parser.add_argument("--window", default=None, metavar="HH:MM-HH:MM",
                         help="定时随机窗口（如 09:00-12:00）：窗口内随机时刻启动")
     args = parser.parse_args()
@@ -307,6 +349,8 @@ def main() -> int:
         return recon()
     if args.retro:
         return _retro_only()
+    if args.keepalive:
+        return _keepalive()
     if args.mode:
         _ensure_schedule_health()             # 开跑先自愈：被清的定时任务补回来
         if _today_done():

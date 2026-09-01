@@ -5,15 +5,24 @@ from datetime import date
 from pathlib import Path
 
 from run import _mark_today_done, _today_done
-from src.scheduler.task_scheduler import TASKS, build_xml
+from src.scheduler.task_scheduler import TASKS, _task_args, build_xml
 
 
-def test_three_redundant_tasks_defined():
-    """三任务异名：主 09:00 + 备份 11:37 + 登录兜底。"""
-    assert len(TASKS) == 3
+def test_redundant_tasks_defined():
+    """四任务：主 09:00 + 备份 11:37 + 登录兜底 + 保活双触发。"""
+    assert len(TASKS) == 4
     assert "WeChatAutoPub_Daily_0900" in TASKS
     assert "WeChatAutoPub_Backup_1137" in TASKS
     assert "WeChatAutoPub_BootCatchup" in TASKS
+    assert TASKS["WeChatAutoPub_KeepAlive"]["times"] == ["07:00", "23:00"]
+
+
+def test_task_args_override():
+    """保活任务有专属参数（--keepalive），其余用公共参数。"""
+    assert _task_args(TASKS["WeChatAutoPub_KeepAlive"],
+                      "--mode auto") == "--keepalive"
+    assert _task_args(TASKS["WeChatAutoPub_Daily_0900"],
+                      "--mode auto") == "--mode auto"
 
 
 def test_build_xml_multi_triggers_and_logon():

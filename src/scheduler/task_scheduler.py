@@ -24,12 +24,24 @@ logger = logging.getLogger(__name__)
 
 TASK_NAME = "WeChatAutoPub_Daily_0900"          # 兼容旧引用
 
-# 任务名 → 触发器（time=每日HH:MM 列表；logon=登录触发）
+# 任务名 → 触发器（time=每日HH:MM 列表；logon=登录触发；
+# arguments=任务专属参数，缺省用公共参数）
 TASKS: dict[str, dict] = {
     "WeChatAutoPub_Daily_0900": {"times": ["09:00"]},
     "WeChatAutoPub_Backup_1137": {"times": ["11:37"]},
     "WeChatAutoPub_BootCatchup": {"times": [], "logon": True},
+    # 登录保活巡检（2026-09-01）：23:00 睡前刷新会话（隔夜失效主战场：
+    # 若平台按活跃度续期，最新鲜的 cookie 带过夜即可免扫码）+ 07:00
+    # 晨检预警（救不回的提前 2 小时企微告警）。与主运行共用单实例锁
+    # （先到先得，撞车即让路）
+    "WeChatAutoPub_KeepAlive": {"times": ["07:00", "23:00"],
+                                "arguments": "--keepalive"},
 }
+
+
+def _task_args(spec: dict, arguments: str) -> str:
+    """任务专属参数（如保活任务的 --keepalive），无则用公共参数。"""
+    return spec.get("arguments", arguments)
 
 _XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -126,7 +138,7 @@ def install_all(*, command: str, arguments: str, workdir: str,
     for name, spec in TASKS.items():
         xml = build_xml(times=spec.get("times", []),
                         logon=spec.get("logon", False),
-                        command=command, arguments=arguments,
+                        command=command, arguments=_task_args(spec, arguments),
                         workdir=workdir, catch_up=catch_up,
                         logon_user=getpass.getuser())
         ok, info = _register(name, xml)
@@ -151,7 +163,7 @@ def ensure_installed(*, command: str, arguments: str, workdir: str,
             continue
         xml = build_xml(times=spec.get("times", []),
                         logon=spec.get("logon", False),
-                        command=command, arguments=arguments,
+                        command=command, arguments=_task_args(spec, arguments),
                         workdir=workdir, catch_up=catch_up,
                         logon_user=getpass.getuser())
         ok, _ = _register(name, xml)

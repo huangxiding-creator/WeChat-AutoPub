@@ -10,6 +10,7 @@ token 提取：URL 正则 token=(\\d+)，后续 CGI 快车道复用。
 from __future__ import annotations
 
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -63,6 +64,91 @@ def extract_nickname(session: BrowserSession) -> str:
     except Exception:  # noqa: BLE001
         pass
     return ""
+
+
+def preflight_logins(
+    cfg,
+    state,
+    profiles: list[str],
+    notifier=None,
+    timeout_minutes: int = 30,
+    wait_scan: bool = True,
+) -> dict[str, str]:
+    """逐档案核登录态。两种模式（2026-09-01 用户指令）：
+
+    wait_scan=True（运行启动预检）：失效→企微提醒+二维码当场等扫，
+      扫完才进发布；超时未扫→跳过该档案不断链。
+    wait_scan=False（保活巡检）：失效→只尝试一键「登录」恢复，救不回
+      即记入失效清单（由调用方汇总告警），不等待扫码。
+    共同点：cookie 有效直接 ✓；等待/检测过程绝不重复导航刷新页面。
+    返回 {profile: 昵称}，昵称为空=该档案仍失效。
+    """
+    from . import nav
+
+    results: dict[str, str] = {}
+    for profile in profiles:
+        try:
+            session = BrowserSession(cfg, profile)
+            session.start()
+        except RuntimeError as exc:
+            logger.warning("[预检] %s 浏览器启动失败: %s", profile, exc)
+            results[profile] = ""
+            continue
+        try:
+            logged = session.is_logged_in()
+            if not logged:
+                logger.info("[预检] %s 登录态失效，尝试一键「登录」恢复", profile)
+                try:
+                    if nav.js_click_visible_text(session.tab, "登录", timeout=4):
+                        time.sleep(8)          # 一键登录生效窗口（实战 8 秒）
+                        logged = session.is_logged_in()
+                except Exception as exc:       # noqa: BLE001 — 快路径失败走扫码
+                    logger.debug("[预检] 一键恢复尝试失败: %s", exc)
+            if not logged and wait_scan:
+                logger.warning("[预检] %s 需扫码（等待 %d 分钟）", profile,
+                               timeout_minutes)
+                if notifier:
+                    notifier.send_action_needed(
+                        "请扫码登录公众号",
+                        f"启动预检：{profile} 登录态失效，请扫码恢复"
+                        f"（{timeout_minutes} 分钟内），扫完自动继续。")
+                deadline = time.time() + timeout_minutes * 60
+                while time.time() < deadline:
+                    time.sleep(3)
+                    # 等待期绝不导航（is_logged_in 会导航首页把二维码刷掉，
+                    # 用户无法扫——09-01 实战踩坑）。纯被动读 URL 判跳转
+                    try:
+                        url = session.tab.url or ""
+                    except Exception:          # noqa: BLE001
+                        url = ""
+                    if "cgi-bin/home" in url or "token=" in url:
+                        logged = True
+                        break
+            if logged:
+                nickname = extract_nickname(session)
+                if not nickname:
+                    time.sleep(2)
+                    nickname = extract_nickname(session)   # 昵称渲染稍慢再取一次
+                state.register_profile(profile, nickname)
+                logger.info("[预检] %s 登录有效 nickname=%s", profile, nickname)
+                results[profile] = nickname
+                try:
+                    session.minimize_window()   # 扫码完成归还桌面
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                logger.warning("[预检] %s 仍失效%s，跳过该档案", profile,
+                               "（超时未扫码）" if wait_scan
+                               else "（一键恢复未成功）")
+                results[profile] = ""
+        finally:
+            session.stop()       # 只断开接管，浏览器进程保留（登录态常驻）
+        time.sleep(random.uniform(1, 3))        # 账号间拟人间隔
+    alive = [p for p, nick in results.items() if nick]
+    logger.info("[预检] 完成：%d/%d 有效（失效跳过：%s）", len(alive),
+                len(profiles), "、".join(p for p in profiles if not results.get(p))
+                or "无")
+    return results
 
 
 def ensure_login(

@@ -49,10 +49,21 @@ class Orchestrator:
     def run(self) -> list[AccountReport]:
         reports: list[AccountReport] = []
         handled: set[str] = set()          # 本次运行已处理的实时昵称
-        for idx, profile in enumerate(self._profile_plan(), start=1):
+        plan = self._profile_plan()
+        # 启动预检（2026-09-01 用户指令）：先逐档案查登录态，失效的当场
+        # 弹码等扫，扫完才进发布；仍失效的跳过该档案（不再断账号链）
+        from ..browser.login import preflight_logins
+        preflight = preflight_logins(
+            self._cfg, self._state, plan, self._notifier,
+            timeout_minutes=self._cfg.账号.登录等待扫码超时分钟,
+        )
+        for idx, profile in enumerate(plan, start=1):
             if self._should_stop():
                 logger.info("收到停止信号，收工")
                 break
+            if not preflight.get(profile):
+                logger.warning("[%s] 预检失效且未扫码，本次跳过", profile)
+                continue
             report, was_dup = self._process_account(profile, idx, handled)
             if was_dup:
                 continue                    # 重复账号：跳过但不断链
