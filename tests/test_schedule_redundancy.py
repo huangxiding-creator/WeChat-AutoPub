@@ -18,11 +18,26 @@ def test_redundant_tasks_defined():
 
 
 def test_task_args_override():
-    """保活任务有专属参数（--keepalive），其余用公共参数。"""
+    """保活任务有专属参数（--keepalive），其余用公共参数（均带埋点）。"""
     assert _task_args(TASKS["WeChatAutoPub_KeepAlive"],
-                      "--mode auto") == "--keepalive"
+                      "--mode auto") == "--keepalive --trigger keepalive"
     assert _task_args(TASKS["WeChatAutoPub_Daily_0900"],
-                      "--mode auto") == "--mode auto"
+                      "--mode auto") == "--mode auto --trigger daily"
+
+
+def test_task_args_append_trigger():
+    """四任务全部携带触发来源埋点（--trigger），值守复盘据此归因。"""
+    expect = {"WeChatAutoPub_Daily_0900": "daily",
+              "WeChatAutoPub_Backup_1137": "backup",
+              "WeChatAutoPub_BootCatchup": "boot",
+              "WeChatAutoPub_KeepAlive": "keepalive"}
+    for name, trig in expect.items():
+        assert TASKS[name]["trigger"] == trig
+    base = "run.py --mode auto --window 09:00-12:00"
+    assert _task_args(TASKS["WeChatAutoPub_Daily_0900"],
+                      base) == base + " --trigger daily"
+    assert _task_args(TASKS["WeChatAutoPub_KeepAlive"],
+                      base) == "--keepalive --trigger keepalive"
 
 
 def test_build_xml_multi_triggers_and_logon():

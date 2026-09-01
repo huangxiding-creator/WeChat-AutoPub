@@ -331,9 +331,17 @@ def main() -> int:
                         help="登录保活巡检：逐号刷新会话+失效预警（不发布，定时 07:00）")
     parser.add_argument("--window", default=None, metavar="HH:MM-HH:MM",
                         help="定时随机窗口（如 09:00-12:00）：窗口内随机时刻启动")
+    parser.add_argument("--trigger", choices=["daily", "backup", "boot",
+                                              "keepalive", "manual"],
+                        default=None,
+                        help="触发来源埋点（四任务差异化携带，复盘据此度量"
+                             "值守可观测性；缺省按 manual 记）")
     args = parser.parse_args()
 
     setup_logging()
+    # 触发来源埋点（2026-09-01 S4）：日志一行即可归因"谁叫醒的"，
+    # 自复盘无人值守维度据此打分；锁前记录——被让路的触发也留痕
+    logger.info("触发来源=%s", args.trigger or "manual")
 
     if args.install_schedule:
         return install_schedule()

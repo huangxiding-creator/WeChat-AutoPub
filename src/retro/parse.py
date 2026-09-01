@@ -15,10 +15,11 @@ _LOG_LINE = re.compile(
 
 @dataclass(frozen=True)
 class Event:
-    """一条日志事件（已剥离级别与模块，仅保留时间与消息）。"""
+    """一条日志事件（时间 + 级别 + 消息；级别供 ERROR 计数分级归因）。"""
 
     ts: datetime
     msg: str
+    level: str = "INFO"
 
 
 def read_events(log_path: Path) -> list[Event]:
@@ -34,7 +35,7 @@ def read_events(log_path: Path) -> list[Event]:
             ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
         except ValueError:
             continue
-        events.append(Event(ts=ts, msg=m.group(3)))
+        events.append(Event(ts=ts, msg=m.group(3), level=m.group(2)))
     return events
 
 

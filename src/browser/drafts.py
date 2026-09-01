@@ -428,10 +428,15 @@ class DraftPublisher:
         立即解析常拿到 0 张（08-31 实测：随即走刷新重入链，每次多花
         1~2 分钟且刷出假漂移告警）。短轮询等渲染，宽限内拿到即返回。
         """
-        deadline = time.time() + float(self._cfg.草稿.贴图渲染宽限秒)
+        grace = float(self._cfg.草稿.贴图渲染宽限秒)
+        deadline = time.time() + grace
         while True:
             cards = self._parse_cards()
             if cards or time.time() >= deadline:
+                if not cards:
+                    # 旋钮2（自复盘可调 界3~15）的调参证据：宽限耗尽仍 0 张
+                    logger.warning(
+                        "贴图渲染宽限超时（%.0fs 未渲染出贴图卡片）", grace)
                 return cards
             time.sleep(2.0)
 

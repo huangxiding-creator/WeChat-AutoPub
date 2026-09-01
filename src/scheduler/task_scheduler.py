@@ -25,23 +25,28 @@ logger = logging.getLogger(__name__)
 TASK_NAME = "WeChatAutoPub_Daily_0900"          # 兼容旧引用
 
 # 任务名 → 触发器（time=每日HH:MM 列表；logon=登录触发；
-# arguments=任务专属参数，缺省用公共参数）
+# arguments=任务专属参数，缺省用公共参数；trigger=触发来源埋点，
+# 复盘据此度量"哪个任务叫醒的"——无人值守可观测）
 TASKS: dict[str, dict] = {
-    "WeChatAutoPub_Daily_0900": {"times": ["09:00"]},
-    "WeChatAutoPub_Backup_1137": {"times": ["11:37"]},
-    "WeChatAutoPub_BootCatchup": {"times": [], "logon": True},
+    "WeChatAutoPub_Daily_0900": {"times": ["09:00"], "trigger": "daily"},
+    "WeChatAutoPub_Backup_1137": {"times": ["11:37"], "trigger": "backup"},
+    "WeChatAutoPub_BootCatchup": {"times": [], "logon": True,
+                                  "trigger": "boot"},
     # 登录保活巡检（2026-09-01）：23:00 睡前刷新会话（隔夜失效主战场：
     # 若平台按活跃度续期，最新鲜的 cookie 带过夜即可免扫码）+ 07:00
     # 晨检预警（救不回的提前 2 小时企微告警）。与主运行共用单实例锁
     # （先到先得，撞车即让路）
     "WeChatAutoPub_KeepAlive": {"times": ["07:00", "23:00"],
-                                "arguments": "--keepalive"},
+                                "arguments": "--keepalive",
+                                "trigger": "keepalive"},
 }
 
 
 def _task_args(spec: dict, arguments: str) -> str:
-    """任务专属参数（如保活任务的 --keepalive），无则用公共参数。"""
-    return spec.get("arguments", arguments)
+    """任务参数合成：专属参数优先，再追加触发来源埋点。"""
+    base = spec.get("arguments", arguments)
+    trig = spec.get("trigger")
+    return f"{base} --trigger {trig}" if trig else base
 
 _XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">

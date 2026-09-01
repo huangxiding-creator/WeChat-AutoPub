@@ -46,6 +46,7 @@ def test_build_metrics_counts(tmp_path: Path):
     # 真漂移信号=文章tab轮次结束告警；贴图箱空完成/中途刷新重试均不计
     assert m.empty_breaks == 1 and m.selector_drift == 1
     assert m.flow_seconds == [90.0]     # 12:00:00 → 12:01:30
+    assert m.flow_article == [90.0]     # V2：文章/贴图流程分离计时
 
 
 def _win(**kw) -> list[DayMetrics]:
@@ -55,21 +56,24 @@ def _win(**kw) -> list[DayMetrics]:
 
 
 def test_rule_shrink_when_picker_never_seen():
-    findings, tune = analyze(_win(picker_seen=0, button_missing=0), picker_now=25)
-    assert tune.new == 20 and tune.changed
+    findings, tunes = analyze(_win(picker_seen=0, button_missing=0),
+                              picker_now=25)
+    assert tunes[0].new == 20 and tunes[0].changed
     assert not any(f.sev == "risk" for f in findings)
 
 
 def test_rule_rollback_on_button_missing():
-    findings, tune = analyze(_win(picker_seen=0, button_missing=2), picker_now=25)
-    assert tune.new == 30 and "回撤" in tune.reason
+    findings, tunes = analyze(_win(picker_seen=0, button_missing=2),
+                              picker_now=25)
+    assert tunes[0].new == 30 and "回撤" in tunes[0].reason
 
 
 def test_rule_floor_and_manual_override():
-    _, tune = analyze(_win(), picker_now=PICKER_BOUNDS[0])     # 已在地板
-    assert tune.new == PICKER_BOUNDS[0]
-    findings, tune = analyze(_win(), picker_now=60)            # 人工越界值
-    assert not tune.changed and any("超出自动区间" in f.evidence for f in findings)
+    _, tunes = analyze(_win(), picker_now=PICKER_BOUNDS[0])    # 已在地板
+    assert tunes[0].new == PICKER_BOUNDS[0]
+    findings, tunes = analyze(_win(), picker_now=60)           # 人工越界值
+    assert not tunes[0].changed \
+        and any("超出自动区间" in f.evidence for f in findings)
 
 
 def test_tuner_apply_and_bounds(tmp_path: Path):
@@ -84,3 +88,13 @@ def test_tuner_apply_and_bounds(tmp_path: Path):
     ini2 = tmp_path / "other.ini"
     ini2.write_text("[草稿]\n", encoding="utf-8")
     assert not apply_tune(Tune("选择弹窗等待秒", 25, 20, "缺键"), ini2)
+
+
+def test_tuner_rejects_out_of_bounds(tmp_path: Path):
+    """旋钮2 越界决策在写入前直接拒绝（纵深防御，双旋钮通用）。"""
+    ini = tmp_path / "config.ini"
+    ini.write_text("[草稿]\n贴图渲染宽限秒 = 8\n", encoding="utf-8")
+    assert not apply_tune(Tune("贴图渲染宽限秒", 8, 99, "越界"), ini)
+    assert "贴图渲染宽限秒 = 8" in ini.read_text(encoding="utf-8")
+    assert apply_tune(Tune("贴图渲染宽限秒", 8, 10, "正常"), ini)
+    assert "贴图渲染宽限秒 = 10" in ini.read_text(encoding="utf-8")

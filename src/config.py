@@ -74,6 +74,7 @@ class RetroConfig:
     开关: bool = True            # 每日收官后自动自复盘
     观察天数: int = 3            # 自调参参考的历史天数
     报告目录: str = "data/retro" # 复盘报告与趋势数据落盘位置
+    告警阈值分: int = 80         # 四维总分低于此值发企微预警（0=关闭）
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,7 @@ def _validate(cfg: AppConfig) -> None:
     _bounds(d.空轮重试上限, 1, 3, "[草稿] 空轮重试上限")
     _bounds(d.贴图渲染宽限秒, 3, 15, "[草稿] 贴图渲染宽限秒")
     _bounds(cfg.复盘.观察天数, 1, 14, "[复盘] 观察天数")
+    _bounds(cfg.复盘.告警阈值分, 0, 100, "[复盘] 告警阈值分")
     if d.发布最近天数 < 1:
         raise ConfigError("[草稿] 发布最近天数 至少为 1")
     if cfg.贴图.翻页数 < 1:
@@ -243,6 +245,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
             开关=_get_bool(cp, "复盘", "开关", True),
             观察天数=_get_int(cp, "复盘", "观察天数", 3),
             报告目录=_get_str(cp, "复盘", "报告目录", "data/retro"),
+            告警阈值分=_get_int(cp, "复盘", "告警阈值分", 80),
         ),
     )
     _validate(cfg)
