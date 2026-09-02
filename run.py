@@ -172,6 +172,35 @@ def _retro_only() -> int:
     return 0
 
 
+def _early_preflight() -> None:
+    """早期预检（2026-09-02 用户指令）：持锁后、睡窗口前先弹码。
+
+    随机窗口可能睡数小时，扫码需求拖到发布前才抛只会错过窗口；
+    开火即预检——用户刚启动项目时大概率在场，第一时间扫掉，
+    到点直接发布。run_once 内的二次预检幂等兜底（已登录档案
+    数秒即过）；本函数任何异常都不影响主流程。
+    """
+    try:
+        from src.browser.login import preflight_logins
+        from src.config import load_config
+        from src.core.state import StateDB
+
+        cfg = load_config()
+        state = StateDB()
+        profiles = [p for p, _n in state.list_profiles()]
+        if not profiles:
+            return
+        results = preflight_logins(
+            cfg, state, profiles, _build_notifier(cfg),
+            timeout_minutes=cfg.账号.登录等待扫码超时分钟)
+        dead = [p for p, ok in results.items() if not ok]
+        logger.info("早期预检：%d/%d 登录就绪，失效=%s",
+                    len(profiles) - len(dead), len(profiles),
+                    "、".join(dead) or "无")
+    except Exception as exc:                # noqa: BLE001
+        logger.warning("早期预检异常（run_once 二次预检兜底）: %s", exc)
+
+
 def _keepalive() -> int:
     """--keepalive：登录保活巡检（每日 07:00 定时，续命+预警，不发布）。
 
@@ -368,6 +397,7 @@ def main() -> int:
         if not _acquire_run_lock():           # 锁先于窗口睡眠：重复触发数秒即退
             return 2
         try:
+            _early_preflight()                # 开火即预检：扫码需求趁用户在场尽早抛出
             if args.window:
                 wait_window(args.window)      # 只有持锁实例才睡窗口
             rc = run_once(args.mode, max_publish=args.max)
