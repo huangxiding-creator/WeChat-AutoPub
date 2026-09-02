@@ -63,8 +63,20 @@ class AccountReport:
         return sum(1 for r in self.triggers if r.ok)
 
     @property
+    def recovered_count(self) -> int:
+        """自愈重试数：先失败、后续同名重试成功的尝试（09-02 实证：
+        群发弹窗 25s 未出现判失败 → 下轮全量扫描发现草稿仍在箱、
+        同名重试成功过金标准；内容零损失，计失败只会假警报）。"""
+        ok_titles = {r.item.title for r in self.results if r.ok}
+        return sum(1 for r in self.results
+                   if not r.ok and r.item.title in ok_titles)
+
+    @property
     def fail_count(self) -> int:
-        return sum(1 for r in self.results if not r.ok)
+        """真失败数：同名条目最终也未成功的失败尝试。"""
+        ok_titles = {r.item.title for r in self.results if r.ok}
+        return sum(1 for r in self.results
+                   if not r.ok and r.item.title not in ok_titles)
 
     @property
     def draft_count(self) -> int:
@@ -78,10 +90,11 @@ class AccountReport:
 def build_report_markdown(reports: tuple[AccountReport, ...], run_date: str) -> str:
     """汇总战报 → 企微 markdown。"""
     lines = [f"📊 **WeChat-AutoPub 日报** {run_date}", ""]
-    total_ok = total_fail = 0
+    total_ok = total_fail = total_rec = 0
     for rep in reports:
         total_ok += rep.ok_count
         total_fail += rep.fail_count
+        total_rec += rep.recovered_count
         trig = f" · 触发生成 {rep.trigger_count}" if rep.trigger_count else ""
         lines.append(
             f"- **{rep.account.nickname}**：✅{rep.ok_count} ❌{rep.fail_count}"
@@ -90,5 +103,6 @@ def build_report_markdown(reports: tuple[AccountReport, ...], run_date: str) -> 
         for r in rep.results:
             mark = "✅" if r.ok else "❌"
             lines.append(f"  - {mark} {r.item.title[:30]} {r.detail[:40]}")
-    lines += ["", f"**合计**：成功 {total_ok} · 失败 {total_fail}"]
+    rec = f" · 自愈 {total_rec}" if total_rec else ""
+    lines += ["", f"**合计**：成功 {total_ok} · 失败 {total_fail}{rec}"]
     return "\n".join(lines)

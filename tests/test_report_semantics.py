@@ -34,6 +34,19 @@ def test_default_triggers_empty_backcompat():
     assert report.trigger_count == 0 and report.ok_count == 1
 
 
+def test_recovered_retry_not_counted_as_fail():
+    """自愈重试（同名先败后成）不计失败、单列自愈数（09-02 实证：
+    弹窗 25s 未出现判失败 → 下轮扫描同名重试成功，内容零损失）。"""
+    report = AccountReport(
+        account=AccountInfo(index=1, nickname="总包之声"),
+        results=(_res("EPC超概", ok=False), _res("EPC超概"),
+                 _res("排污许可", ok=False)),
+    )
+    assert report.recovered_count == 1
+    assert report.fail_count == 1        # 只剩真失败（排污许可）
+    assert report.ok_count == 1
+
+
 def test_report_markdown_shows_trigger_line():
     report = AccountReport(account=AccountInfo(1, "总包之声"),
                            results=(_res("发布1"),),

@@ -59,7 +59,9 @@ def run_once(mode: str, max_publish: int | None = None) -> int:
 
     ok = sum(r.ok_count for r in reports)
     fail = sum(r.fail_count for r in reports)
-    logger.info("运行结束：账号 %d 个，成功 %d，失败 %d", len(reports), ok, fail)
+    recovered = sum(r.recovered_count for r in reports)
+    logger.info("运行结束：账号 %d 个，成功 %d，失败 %d%s", len(reports),
+                ok, fail, f"，自愈 {recovered}" if recovered else "")
     return 0 if fail == 0 else 1
 
 

@@ -137,12 +137,12 @@ class Orchestrator:
         # 用已实战验证的草稿发布链再发布一轮（贴图即今日新草稿）
         picposts_drafts: list = []
         if any(r.ok for r in picposts):
-            # 贴图专用间隔 20~50 秒（2026-08-29 用户明令：贴图间隔
-            # 1 分钟之内；文章轮仍走 3~5 分钟防风控节奏）
+            # 贴图/文章间隔均由 _polite_wait 按内容类型取 config.ini
+            # [草稿] 对应配置（2026-09-02 起贴图 5~10 秒，历史演变见
+            # config.py DraftConfig 注释）；此处不再传 gap_range 覆盖
             picposts_drafts = DraftPublisher(
                 session, self._cfg, self._state, self._notifier,
                 account_name=nickname, should_stop=self._should_stop,
-                gap_range=(20, 50),
             ).publish_recent_drafts()
 
         # 永不登出：每账号独立浏览器实例，切换账号=切换浏览器，
@@ -244,7 +244,9 @@ class Orchestrator:
                 if report.trigger_count else "")
         lines = [
             f"📋 **账号战报 · {report.account.nickname}**",
-            f"✅ 成功 {report.ok_count} · ❌ 失败 {report.fail_count}{trig}",
+            f"✅ 成功 {report.ok_count} · ❌ 失败 {report.fail_count}"
+            + (f" · ♻️ 自愈 {report.recovered_count}"
+               if report.recovered_count else "") + trig,
         ]
         for r in report.results:
             mark = "✅" if r.ok else "❌"
