@@ -79,6 +79,7 @@ def run_retro(day: date | None = None,
     scorecard = score_window(
         window,
         gap_bounds=(cfg.草稿.每篇间隔最小秒, cfg.草稿.每篇间隔最大秒),
+        pic_gap_bounds=(cfg.草稿.贴图间隔最小秒, cfg.草稿.贴图间隔最大秒),
         missing_tasks=_missing_scheduled_tasks())
     latest = window[-1]
     report = render_report(day, latest, findings, scorecard, tunes, applied)

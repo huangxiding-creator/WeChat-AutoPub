@@ -95,8 +95,8 @@ class DraftCard:
             self.title)
 
 
-# 贴图专用篇间间隔（2026-08-29 用户明令：贴图间隔 1 分钟之内）
-_PICPOST_GAP_RANGE = (20, 50)
+# 贴图专用篇间间隔：2026-08-29 用户明令 1 分钟之内；2026-09-02 收紧为 5 秒左右
+# ——现为配置驱动（[草稿] 贴图间隔最小秒/最大秒，默认 5~10s 随机）
 
 
 def _parse_date(text: str) -> Optional[datetime]:
@@ -1113,9 +1113,10 @@ return (() => {
         return ""
 
     def _polite_wait(self, fast: bool = False) -> None:
-        """篇间随机间隔（文章 3~5 分钟用户指定；贴图 20~50 秒），支持随时停止。"""
+        """篇间随机间隔（文章/贴图各自配置驱动），支持随时停止。"""
         if fast:
-            lo, hi = _PICPOST_GAP_RANGE
+            lo, hi = (self._cfg.草稿.贴图间隔最小秒,
+                      self._cfg.草稿.贴图间隔最大秒)
             tag = "贴图专用"
         else:
             lo, hi = (self._gap_range

@@ -71,7 +71,28 @@ def test_floor_zero():
 
 
 def test_gap_violation_deduction():
-    """文章间隔越出配置界（90~150）每条 -5；贴图界 20~50 同理。"""
-    m = _day(gap_article=[95, 200, 160], gap_pic=[30, 80])
+    """文章间隔越出配置界（90~150）每条 -5；贴图界 5~10 同理。"""
+    m = _day(gap_article=[95, 200, 160], gap_pic=[7, 80])
     sc = score_window([m], gap_bounds=(90, 150))
     assert sc.efficiency.score == 100 - 5 * 3      # 文章2条 + 贴图1条
+
+
+def test_pic_gap_bounds_default_and_config():
+    """贴图间隔界默认 (5,10)（2026-09-02 用户明令 5 秒左右），可由配置传入。"""
+    m = _day(gap_pic=[5, 10])
+    assert score_window([m]).efficiency.score == 100   # 落在界内不扣
+    m2 = _day(gap_pic=[20])                            # 旧的 20s 现在越界
+    assert score_window([m2]).efficiency.score < 100
+    m3 = _day(gap_pic=[30])                            # 自定义宽界时合法
+    assert score_window([m3], pic_gap_bounds=(20, 50)).efficiency.score == 100
+
+
+def test_pic_gap_config_validation(tmp_path):
+    """贴图间隔配置非法（最小>最大）须被拒（纵深防御）。"""
+    import pytest
+    from src.config import ConfigError, load_config
+    ini = tmp_path / "config.ini"
+    ini.write_text("[草稿]\n贴图间隔最小秒 = 30\n贴图间隔最大秒 = 5\n",
+                   encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(ini)

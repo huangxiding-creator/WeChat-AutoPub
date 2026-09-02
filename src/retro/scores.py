@@ -19,7 +19,7 @@ from .metrics import DayMetrics
 _ARTICLE_BASE_S, ARTICLE_ZERO_S = 180.0, 900.0
 _PIC_BASE_S, PIC_ZERO_S = 60.0, 300.0
 _ARTICLE_MAX_DED, _PIC_MAX_DED = 60, 25
-_PIC_GAP_BOUNDS = (20, 50)      # 贴图专用间隔界（drafts._PICPOST_GAP_RANGE）
+_PIC_GAP_BOUNDS = (5, 10)       # 贴图专用间隔界（默认同 config 贴图间隔秒）
 
 
 @dataclass(frozen=True)
@@ -96,7 +96,8 @@ def _score_login(m: DayMetrics) -> PillarScore:
 
 
 def _score_efficiency(m: DayMetrics,
-                      gap_bounds: tuple[int, int]) -> PillarScore:
+                      gap_bounds: tuple[int, int],
+                      pic_gap_bounds: tuple[int, int]) -> PillarScore:
     """② 安全效率：流程耗时线性计分 + 间隔越界 + 弹窗风控信号。"""
     d: list[Deduction] = []
     a_mean, p_mean = _mean(m.flow_article), _mean(m.flow_pic)
@@ -116,7 +117,7 @@ def _score_efficiency(m: DayMetrics,
         d.append(Deduction(f"账号选择弹窗出现 {m.picker_seen} 次"
                            f"（风控信号，每次 -8）", m.picker_seen * 8))
     art_bad = _out_of_bounds(m.gap_article, gap_bounds)
-    pic_bad = _out_of_bounds(m.gap_pic, _PIC_GAP_BOUNDS)
+    pic_bad = _out_of_bounds(m.gap_pic, pic_gap_bounds)
     if art_bad + pic_bad:
         d.append(Deduction(
             f"拟人间隔越界 文章{art_bad}条/贴图{pic_bad}条（每条 -5）",
@@ -171,12 +172,13 @@ def _score_unattended(m: DayMetrics, missing_tasks: int) -> PillarScore:
 
 def score_window(window: list[DayMetrics],
                  gap_bounds: tuple[int, int] = (90, 150),
+                 pic_gap_bounds: tuple[int, int] = _PIC_GAP_BOUNDS,
                  missing_tasks: int = 0) -> Scorecard:
     """观察窗口 → 四维得分卡（只评窗口最后一天；引擎传入任务缺失数）。"""
     m = window[-1]
     return Scorecard(
         login=_score_login(m),
-        efficiency=_score_efficiency(m, gap_bounds),
+        efficiency=_score_efficiency(m, gap_bounds, pic_gap_bounds),
         stability=_score_stability(m),
         unattended=_score_unattended(m, missing_tasks),
     )
