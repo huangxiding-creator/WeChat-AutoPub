@@ -166,12 +166,13 @@ def build_metrics(events: list[Event], day: date, db_path: Path) -> DayMetrics:
             if hit:
                 (m.gap_pic if hit.group(2) == "贴图专用"
                  else m.gap_article).append(int(hit.group(1)))
-        # 空轮终结与漂移可同现一行（文章tab空轮终结告警自带漂移
-        # 提示），故独立计数不走 elif 链
+        # 空轮终结与漂移同现一行（终结告警自带漂移提示）：url 带
+        # type=77 = 贴图 tab 语境的箱空收官（09-01/09-02 实证 7 条全
+        # 是，非选择器失灵），只计空轮；漂移只认文章 tab 的终结告警
         if "次解析到 0 张草稿卡片，结束本轮" in msg:
             m.empty_breaks += 1
-        if "选择器可能漂移" in msg:
-            m.selector_drift += 1
+            if "type=77" not in msg:
+                m.selector_drift += 1
     _attach_db(m, db_path)
     return m
 

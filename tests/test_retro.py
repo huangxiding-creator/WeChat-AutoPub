@@ -39,12 +39,19 @@ def test_build_metrics_counts(tmp_path: Path):
             "选择器可能漂移，建议 run.py --recon 存档排查（url=x）"),
         _ev("2026-08-30 12:07:00",
             "贴图箱已空（连续 2 次解析到 0 张草稿卡片），贴图轮完成"),
+        _ev("2026-08-30 12:08:00",
+            "连续 3 次解析到 0 张草稿卡片，结束本轮——若箱内仍有草稿则"
+            "选择器可能漂移，建议 run.py --recon 存档排查"
+            "（url=https://mp.weixin.qq.com/cgi-bin/appmsg"
+            "?begin=0&count=10&type=77&action=list_card&token=1）"),
     ]
     m = build_metrics(evs, date(2026, 8, 30), tmp_path / "no.db")
     assert m.gold_pass == 1 and m.accounts_done == 1
     assert m.gap_article == [150] and m.gap_pic == [35]
-    # 真漂移信号=文章tab轮次结束告警；贴图箱空完成/中途刷新重试均不计
-    assert m.empty_breaks == 1 and m.selector_drift == 1
+    # 真漂移信号=文章tab轮次结束告警（url 无 type=77）；贴图tab语境的
+    # 终结（url 带 type=77，09-01/09-02 实证 7 条全是）= 箱空正常收官，
+    # 只计空轮不计漂移；贴图箱空完成/中途刷新重试也不计
+    assert m.empty_breaks == 2 and m.selector_drift == 1
     assert m.flow_seconds == [90.0]     # 12:00:00 → 12:01:30
     assert m.flow_article == [90.0]     # V2：文章/贴图流程分离计时
 
