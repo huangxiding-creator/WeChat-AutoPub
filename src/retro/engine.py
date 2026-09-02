@@ -8,6 +8,7 @@ V2（2026-09-01 用户指令）闭环：观测→四维打分→诊断→有界�
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from ..constants import PROJECT_ROOT
 from .metrics import build_metrics
 from .parse import filter_day, read_events
 from .report import render_report, update_backlog, write_outputs
-from .rules import analyze
+from .rules import Tune, analyze
 from .scores import score_window
 from .tuner import apply_tune
 
@@ -50,6 +51,29 @@ def _notify_low_score(total: int, grade: str, threshold: int,
         logger.warning("[复盘] 低分预警发送失败（无害）: %s", exc)
 
 
+def _suppress_tunes(tunes: list[Tune], report_dir: Path,
+                    day: date) -> list[Tune]:
+    """同日已调过参 → 本次决策全转维持（2026-09-02 实证：混版异常后
+    手动补跑复盘，观察窗口证据仍在，旋钮被叠加推高 10→12→14）。
+
+    判据复用 trend.csv 同日幂等行：tuned 列非空即当日已写过 config；
+    apply_tune 对未变化决策自动跳过，报告/trend 口径保持自洽。
+    """
+    csv_path = report_dir / "trend.csv"
+    if not csv_path.exists():
+        return tunes
+    try:
+        for ln in csv_path.read_text(encoding="utf-8").splitlines():
+            fields = ln.split(",")
+            if fields and fields[0] == day.isoformat():
+                if len(fields) > 18 and fields[18].strip():
+                    return [replace(t, new=t.old) for t in tunes]
+                return tunes               # 当日行存在但未调参 → 正常放行
+    except OSError:
+        pass                               # 读不了就当没调过（宁可多调一次）
+    return tunes
+
+
 def run_retro(day: date | None = None,
               log_path: Path | None = None,
               db_path: Path | None = None,
@@ -75,6 +99,8 @@ def run_retro(day: date | None = None,
     findings, tunes = analyze(
         window, picker_now=cfg.草稿.选择弹窗等待秒,
         grace_now=cfg.草稿.贴图渲染宽限秒)
+    report_dir = Path(cfg.复盘.报告目录)
+    tunes = _suppress_tunes(tunes, report_dir, day)   # 同日幂等防叠加
     applied = [apply_tune(t, ini_path) for t in tunes]
     scorecard = score_window(
         window,
@@ -83,7 +109,6 @@ def run_retro(day: date | None = None,
         missing_tasks=_missing_scheduled_tasks())
     latest = window[-1]
     report = render_report(day, latest, findings, scorecard, tunes, applied)
-    report_dir = Path(cfg.复盘.报告目录)
     md_path, _csv_path = write_outputs(report_dir, latest, report,
                                        scorecard, tunes)
 

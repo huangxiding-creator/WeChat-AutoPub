@@ -158,11 +158,32 @@ def _acquire_run_lock() -> bool:
 
 
 def _run_retro_safe() -> None:
-    """收官自复盘（安全包装：任何异常不影响退出码与发布结果）。"""
+    """收官自复盘（安全包装：任何异常不影响退出码与发布结果）。
+
+    2026-09-02 根治混版异常（两日实证：运行中改代码 → 进程内缓存旧
+    config + 惰性导入新 engine → AttributeError → 复盘产物缺失）：
+    改用子进程跑 `run.py --retro`——子进程全新解释器全量加载磁盘最新
+    代码，物理隔离版本，收官链永远用新代码（用户指令：确保后续都用
+    新代码）。stdout=复盘 summary；stderr 逐行按级别转发（子进程
+    logging 默认走 stderr，混入的 INFO 降噪为 info）。
+    """
     try:
-        from src.retro import run_retro
-        summary = run_retro()
-        logging.info("[收官] 自复盘：%s", summary)
+        import subprocess
+        from src.constants import PROJECT_ROOT
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        proc = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "run.py"), "--retro"],
+            capture_output=True, text=True, encoding="utf-8",
+            cwd=str(PROJECT_ROOT), env=env, timeout=300)
+        for ln in filter(None, (proc.stdout or "").splitlines()):
+            logging.info("[收官][复盘子进程] %s", ln)
+        for ln in filter(None, (proc.stderr or "").splitlines()):
+            is_warn = ("WARNING" in ln or "ERROR" in ln or "Traceback" in ln)
+            logging.log(logging.WARNING if is_warn else logging.INFO,
+                        "[收官][复盘子进程] %s", ln)
+        if proc.returncode != 0:
+            logging.warning("自复盘子进程退出码 %d（不影响发布结果）",
+                            proc.returncode)
     except Exception as exc:  # noqa: BLE001
         logging.warning("自复盘异常（不影响发布结果）: %s", exc)
 
