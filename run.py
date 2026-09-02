@@ -371,6 +371,10 @@ def install_schedule() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="公众号草稿与贴图自动发布")
     parser.add_argument("--mode", choices=["run", "auto"], help="运行模式")
+    parser.add_argument("--force", action="store_true",
+                        help="跳过当日幂等防重立即跑（仅限用户明令补跑；"
+                             "内容层 content_hash 去重+金标准天然幂等，重跑"
+                             "只发新增草稿，旧内容零副作用）")
     parser.add_argument("--max", type=int, default=None,
                         help="首跑限流：单账号最多发布 N 篇（如 --max 1）")
     parser.add_argument("--install-schedule", action="store_true", help="安装每日定时任务")
@@ -413,7 +417,7 @@ def main() -> int:
         return _keepalive()
     if args.mode:
         _ensure_schedule_health()             # 开跑先自愈：被清的定时任务补回来
-        if _today_done():
+        if _today_done() and not args.force:
             logger.info("今日运行已完成（幂等防重），本触发安全退出")
             print("今日运行已完成，无需重复")
             return 0
