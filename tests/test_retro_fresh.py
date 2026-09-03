@@ -94,3 +94,21 @@ def test_run_retro_safe_crash_swallowed(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         run_mod._run_retro_safe()
     assert "自复盘异常" in caplog.text
+
+
+def test_missing_tasks_zero_when_schedule_disabled(monkeypatch):
+    """定时机制退役（[定时]启用=否）后，值守维不再按任务缺失扣分。"""
+    from types import SimpleNamespace
+    import src.retro.engine as eng
+
+    def fake_status():
+        return True, "3/4 就绪 [缺失] WeChatAutoPub_KeepAlive"
+
+    monkeypatch.setattr("src.scheduler.task_scheduler", SimpleNamespace(
+        task_status=fake_status))
+    monkeypatch.setattr("src.config.load_config",
+                        lambda: SimpleNamespace(定时=SimpleNamespace(启用=False)))
+    assert eng._missing_scheduled_tasks() == 0     # 退役：不算缺失
+    monkeypatch.setattr("src.config.load_config",
+                        lambda: SimpleNamespace(定时=SimpleNamespace(启用=True)))
+    assert eng._missing_scheduled_tasks() == 1     # 启用：照常计量

@@ -25,8 +25,15 @@ logger = logging.getLogger(__name__)
 
 
 def _missing_scheduled_tasks() -> int:
-    """定时任务在位数（安全包装：查询失败按 0 处理，不阻断复盘）。"""
+    """定时任务在位数（安全包装：查询失败按 0 处理，不阻断复盘）。
+
+    2026-09-03 定时机制退役（用户指令，[定时]启用=否）：退役状态下
+    任务不在位是预期事实，不算缺失——否则值守维被扣光成假警报。
+    """
     try:
+        from ..config import load_config
+        if not load_config().定时.启用:
+            return 0
         from ..scheduler import task_scheduler
         _ok, line = task_scheduler.task_status()
         return line.count("[缺失]")
