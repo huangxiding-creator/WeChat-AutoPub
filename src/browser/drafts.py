@@ -207,7 +207,7 @@ class DraftPublisher:
     # —— 入口 ——
 
     def publish_recent_drafts(self) -> list[PublishResult]:
-        """发布最近 N 天草稿（含熔断 + 去重 + 拟人间隔）。"""
+        """全闭环发布：文章 tab + 贴图 tab（旁路单档案兼容入口）。"""
         if not self._open_draft_box():
             return [PublishResult(
                 item=ContentItem(ctype=CONTENT_TYPE_DRAFT, title="<打开草稿箱失败>",
@@ -219,6 +219,27 @@ class DraftPublisher:
         results = self._publish_loop(results, picpost_tab=False)
         results = self._publish_loop(results, picpost_tab=True)
         return results
+
+    def publish_article_drafts(self) -> list[PublishResult]:
+        """阶段1 专用：只发文章 tab（2026-09-03 用户指令两阶段顺序——
+        先三号草稿再三号贴图，贴图留给阶段2 统一收）。"""
+        if not self._open_draft_box():
+            return [PublishResult(
+                item=ContentItem(ctype=CONTENT_TYPE_DRAFT, title="<打开草稿箱失败>",
+                                 content_hash=""),
+                ok=False, detail="无法打开草稿箱页面",
+            )]
+        return self._publish_loop([], picpost_tab=False)
+
+    def publish_picpost_drafts(self) -> list[PublishResult]:
+        """阶段2 贴图轮专用：只发贴图 tab（触发生成后新落箱的贴图）。"""
+        if not self._open_draft_box():
+            return [PublishResult(
+                item=ContentItem(ctype=CONTENT_TYPE_DRAFT, title="<打开草稿箱失败>",
+                                 content_hash=""),
+                ok=False, detail="无法打开草稿箱页面",
+            )]
+        return self._publish_loop([], picpost_tab=True)
 
     def _publish_loop(self, results: list[PublishResult],
                       picpost_tab: bool) -> list[PublishResult]:

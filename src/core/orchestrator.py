@@ -1,6 +1,8 @@
 """主编排器：多账号循环。
 
-流程：登录账号N → 发布草稿(最近N天) → 发布贴图(翻N页) → 企微战报 → 下一账号。
+流程（2026-09-03 两阶段，用户指令）：阶段1 依次发布各号文章草稿 →
+阶段2 依次发布各号贴图（存量+触发生成+新落箱）→ 收官按号合并战报。
+阶段切换耗时天然吸收平台自动生成贴图的延迟，一次运行全收。
 
 多账号 cookie 档案：
   每账号独立 profile（acct01/acct02…）= 独立浏览器实例（独立端口），
@@ -47,8 +49,13 @@ class Orchestrator:
     # —— 主入口 ——
 
     def run(self) -> list[AccountReport]:
-        reports: list[AccountReport] = []
-        handled: set[str] = set()          # 本次运行已处理的实时昵称
+        """两阶段发布（2026-09-03 用户指令）：先三号草稿、再三号贴图。
+
+        公众号后台发布草稿后会自动生成贴图，但中间有时间间隔——账号
+        内闭环（草稿→贴图→新贴图）一次跑不完刚生成的贴图。改为全局
+        两阶段：阶段切换的耗时天然吸收贴图生成延迟，一次运行全收。
+        全程仍单号串行（任一时刻只有一个号的浏览器在操作）。
+        """
         plan = self._profile_plan()
         # 启动预检（2026-09-01 用户指令）：先逐档案查登录态，失效的当场
         # 弹码等扫，扫完才进发布；仍失效的跳过该档案（不再断账号链）
@@ -57,66 +64,137 @@ class Orchestrator:
             self._cfg, self._state, plan, self._notifier,
             timeout_minutes=self._cfg.账号.登录等待扫码超时分钟,
         )
-        for idx, profile in enumerate(plan, start=1):
+        ready: list[str] = []
+        for profile in plan:
             if self._should_stop():
                 logger.info("收到停止信号，收工")
                 break
             if not preflight.get(profile):
                 logger.warning("[%s] 预检失效且未扫码，本次跳过", profile)
                 continue
-            report, was_dup = self._process_account(profile, idx, handled)
-            if was_dup:
-                continue                    # 重复账号：跳过但不断链
-            if report is None:
-                # 登录失败/超时：账号链自然结束（无人扫码即收工）
-                logger.info("账号链结束（%s 未登录）", profile)
+            ready.append(profile)
+        nicknames: dict[str, str] = {}     # profile → 实时昵称（两阶段共用）
+
+        # —— 阶段1：依次发布各号文章草稿 ——
+        drafts_map: dict[str, list[PublishResult]] = {}
+        handled: set[str] = set()          # 阶段内实时昵称判重
+        for idx, profile in enumerate(ready, start=1):
+            if self._should_stop():
                 break
-            reports.append(report)
-            self._push_account_report(report)
+            session = self._open_logged_session(profile, idx, handled, nicknames)
+            if session is None:
+                continue
+            nickname = nicknames[profile]
+            drafts_map[profile] = self._draft_phase(session, nickname)
+            logger.info("[%s] %s 草稿阶段完成（文章 %d 篇）", profile,
+                        nickname, sum(1 for r in drafts_map[profile] if r.ok))
+            session.stop()
+
+        # —— 阶段2：依次发布各号贴图（存量贴图 + 触发生成 + 新落箱） ——
+        handled.clear()                    # 阶段间清空：判重只防同阶段重复档案
+        triggers_map: dict[str, list[PublishResult]] = {}
+        pic_results_map: dict[str, list[PublishResult]] = {}
+        for idx, profile in enumerate(ready, start=1):
+            if self._should_stop():
+                break
+            session = self._open_logged_session(profile, idx, handled, nicknames)
+            if session is None:
+                continue
+            nickname = nicknames[profile]
+            pics, picdrafts = self._picpost_phase(session, nickname)
+            triggers_map[profile] = pics
+            pic_results_map[profile] = picdrafts
+            logger.info("[%s] %s 贴图阶段完成，保留登录态（不登出）",
+                        profile, nickname)
+            session.stop()
+
+        # 收官合并战报（每号一条：阶段1 草稿 + 阶段2 贴图草稿/触发）
+        reports: list[AccountReport] = []
+        for idx, profile in enumerate(ready, start=1):
+            if profile not in nicknames:
+                continue
+            reports.append(AccountReport(
+                account=AccountInfo(index=idx, nickname=nicknames[profile]),
+                results=tuple(drafts_map.get(profile, [])
+                              + pic_results_map.get(profile, [])),
+                triggers=tuple(triggers_map.get(profile, []))))
+            self._push_account_report(reports[-1])
 
         self._push_daily_report(reports)
         return reports
 
-    # —— 账号处理（会话内闭环：登录→发布→登出→退出）——
+    def _open_logged_session(self, profile: str, index: int,
+                             handled: set[str],
+                             nicknames: dict[str, str]) -> Optional[BrowserSession]:
+        """起浏览器并登录，成功返回会话（调用方用完 stop），失败 None。
 
-    def _process_account(
-        self, profile: str, index: int, handled: set[str],
-        target_nickname: str = "",
-    ) -> tuple[Optional[AccountReport], bool]:
+        阶段2 复用阶段1 已知昵称作错号守卫（target_nickname）。
+        """
         session = BrowserSession(self._cfg, profile)
         try:
             session.start()
         except RuntimeError as exc:
             logger.warning("[%s] 浏览器会话启动失败，跳过该账号: %s", profile, exc)
-            return None, False
-        try:
-            def _on_action(action: str, detail: str) -> None:
-                if self._notifier:
-                    self._notifier.send_action_needed(action, detail)
+            return None
 
+        def _on_action(action: str, detail: str) -> None:
+            if self._notifier:
+                self._notifier.send_action_needed(action, detail)
+
+        try:
             login = ensure_login(
                 session,
                 timeout_minutes=self._cfg.账号.登录等待扫码超时分钟,
                 on_action_needed=_on_action,
-                target_nickname=target_nickname,
+                target_nickname=nicknames.get(profile, ""),
             )
             if not login.ok:
                 logger.warning("[%s] 登录失败: %s", profile, login.detail)
-                return None, False
-
+                session.stop()
+                return None
             nickname = login.nickname or f"账号{index}"
             self._state.register_profile(profile, nickname)
             if nickname in handled:
                 # 实时判重（历史存档昵称可能过期：浏览器里换号登录后，
                 # 旧存档昵称会误导静态去重跳过本该处理的账号）
                 logger.info("[%s] %s 已由其它档案处理过，跳过", profile, nickname)
-                return None, True
+                session.stop()
+                return None
             handled.add(nickname)
-            return self._run_account_pipeline(session, profile, nickname,
-                                              index), False
-        finally:
-            # 浏览器为独立常驻进程：不退出（登录态跨天存活），只断开本次接管
+            nicknames[profile] = nickname
+            return session
+        except Exception:                  # noqa: BLE001 — 会话级异常不拖垮整轮
             session.stop()
+            return None
+
+    def _draft_phase(self, session: BrowserSession,
+                     nickname: str) -> list[PublishResult]:
+        """阶段1：文章草稿（贴图留给阶段2）。"""
+        return DraftPublisher(
+            session, self._cfg, self._state, self._notifier,
+            account_name=nickname, should_stop=self._should_stop,
+        ).publish_article_drafts()
+
+    def _picpost_phase(self, session: BrowserSession,
+                       nickname: str) -> tuple[list, list]:
+        """阶段2：存量贴图/触发生成 → 新落箱贴图再发一轮。
+
+        返回 (触发结果, 贴图草稿发布结果)——触发≠发布，口径分列。
+        """
+        pics = PicPostPublisher(
+            session, self._cfg, self._state, self._notifier,
+            account_name=nickname, should_stop=self._should_stop,
+        ).publish_picposts()
+        picdrafts: list = []
+        if any(r.ok for r in pics):
+            # 贴图草稿由「去查看」触发生成，落在草稿箱贴图 tab——
+            # 只发贴图 tab（新落箱贴图），间隔由 _polite_wait 按内容
+            # 类型取 config.ini [草稿] 对应配置（2026-09-02 起 5~10 秒）
+            picdrafts = DraftPublisher(
+                session, self._cfg, self._state, self._notifier,
+                account_name=nickname, should_stop=self._should_stop,
+            ).publish_picpost_drafts()
+        return pics, picdrafts
 
     def _run_account_pipeline(self, session: BrowserSession, profile: str,
                               nickname: str, index: int) -> AccountReport:
